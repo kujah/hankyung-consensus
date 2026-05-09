@@ -1,0 +1,82 @@
+name: Hankyung Consensus Daily
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: Optional target date in YYYY-MM-DD. Leave empty to use latest available date.
+        required: false
+        type: string
+  schedule:
+    - cron: "15 22 * * 0-4"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: hankyung-consensus-pages
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      HANKYUNG_TARGET_DATE: ${{ github.event.inputs.target_date || '' }}
+      TZ: Asia/Seoul
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate secret
+        shell: bash
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "OPENAI_API_KEY secret is missing."
+            exit 1
+          fi
+
+      - name: Run collector
+        run: python stocks.py
+
+      - name: Upload reports bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: hankyung-consensus-output
+          retention-days: 14
+          path: |
+            reports_mobile/
+            reports_json/
+            reports_pdf/
+            hankyung_consensus_summary_*.xlsx
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: reports_mobile
+
+  deploy:
+    needs: collect
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
