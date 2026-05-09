@@ -11,7 +11,7 @@ on:
     - cron: "15 22 * * 0-4"
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -53,6 +53,19 @@ jobs:
 
       - name: Run collector
         run: python stocks.py
+
+      - name: Persist archive to repository
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f reports_mobile/
+          if git diff --cached --quiet; then
+            echo "No archive changes to commit."
+          else
+            git commit -m "Update mobile archive"
+            git push
+          fi
 
       - name: Upload reports bundle
         uses: actions/upload-artifact@v4
