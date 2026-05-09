@@ -53,6 +53,23 @@ SUMMARY_SCHEMA: dict[str, Any] = {
         "valuation": {"type": ["string", "null"]},
         "risks": {"type": "array", "items": {"type": "string"}},
         "summary": {"type": "string"},
+        "target_price_revision_direction": {"type": ["string", "null"]},
+        "target_price_revision_rate": {"type": ["number", "null"]},
+        "investment_opinion_revision_direction": {"type": ["string", "null"]},
+        "earnings_revision_positive": {"type": "boolean"},
+        "structural_growth_positive": {"type": "boolean"},
+        "industry_cycle_positive": {"type": "boolean"},
+        "supply_shortage_positive": {"type": "boolean"},
+        "asp_rising_positive": {"type": "boolean"},
+        "capex_cycle_positive": {"type": "boolean"},
+        "backlog_positive": {"type": "boolean"},
+        "new_customer_positive": {"type": "boolean"},
+        "market_share_positive": {"type": "boolean"},
+        "valuation_risk_negative": {"type": "boolean"},
+        "front_running_negative": {"type": "boolean"},
+        "peakout_negative": {"type": "boolean"},
+        "margin_slowdown_negative": {"type": "boolean"},
+        "demand_slowdown_negative": {"type": "boolean"},
     },
     "required": [
         "report_type",
@@ -69,8 +86,61 @@ SUMMARY_SCHEMA: dict[str, Any] = {
         "valuation",
         "risks",
         "summary",
+        "target_price_revision_direction",
+        "target_price_revision_rate",
+        "investment_opinion_revision_direction",
+        "earnings_revision_positive",
+        "structural_growth_positive",
+        "industry_cycle_positive",
+        "supply_shortage_positive",
+        "asp_rising_positive",
+        "capex_cycle_positive",
+        "backlog_positive",
+        "new_customer_positive",
+        "market_share_positive",
+        "valuation_risk_negative",
+        "front_running_negative",
+        "peakout_negative",
+        "margin_slowdown_negative",
+        "demand_slowdown_negative",
     ],
     "additionalProperties": False,
+}
+
+MARKET_REACTION_TEMPLATE = {
+    "status": "pending",
+    "d1_return_pct": None,
+    "d5_return_pct": None,
+    "d20_return_pct": None,
+}
+
+SCORING_REQUIRED_KEYS = {
+    "alpha_score",
+    "alpha_grade",
+    "score_reason",
+    "positive_factors",
+    "negative_factors",
+    "revision_signal",
+    "structural_growth_signal",
+    "valuation_risk_signal",
+    "market_reaction_placeholder",
+    "target_price_revision_direction",
+    "target_price_revision_rate",
+    "investment_opinion_revision_direction",
+    "earnings_revision_positive",
+    "structural_growth_positive",
+    "industry_cycle_positive",
+    "supply_shortage_positive",
+    "asp_rising_positive",
+    "capex_cycle_positive",
+    "backlog_positive",
+    "new_customer_positive",
+    "market_share_positive",
+    "valuation_risk_negative",
+    "front_running_negative",
+    "peakout_negative",
+    "margin_slowdown_negative",
+    "demand_slowdown_negative",
 }
 
 
@@ -328,21 +398,286 @@ def parse_json_response(raw_text: str) -> dict[str, Any]:
     raise ValueError("Failed to parse JSON payload from model response.")
 
 
+def dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = clean_text(value)
+        if not cleaned:
+            continue
+        lowered = cleaned.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(cleaned)
+    return result
+
+
+def normalize_market_reaction_placeholder(value: Any) -> dict[str, Any]:
+    payload = dict(MARKET_REACTION_TEMPLATE)
+    if isinstance(value, dict):
+        for key in payload:
+            payload[key] = value.get(key)
+        if not payload.get("status"):
+            payload["status"] = "pending"
+    return payload
+
+
+def clamp_score(value: float) -> int:
+    return int(max(0, min(100, round(value))))
+
+
+def alpha_grade_for(score: int | None) -> str | None:
+    if score is None:
+        return None
+    if score >= 85:
+        return "S"
+    if score >= 70:
+        return "A"
+    if score >= 55:
+        return "B"
+    if score >= 40:
+        return "C"
+    return "D"
+
+
+def summarize_revision_signal(summary: dict[str, Any]) -> str | None:
+    parts: list[str] = []
+    target_direction = clean_text(summary.get("target_price_revision_direction"))
+    target_rate = summary.get("target_price_revision_rate")
+    if target_direction == "up":
+        if isinstance(target_rate, (int, float)) and target_rate > 0:
+            parts.append(f"목표주가 상향(+{target_rate:.1f}%)")
+        else:
+            parts.append("목표주가 상향")
+    elif target_direction == "down":
+        parts.append("목표주가 하향")
+
+    opinion_direction = clean_text(summary.get("investment_opinion_revision_direction"))
+    if opinion_direction == "up":
+        parts.append("투자의견 상향")
+    elif opinion_direction == "down":
+        parts.append("투자의견 하향")
+
+    if summary.get("earnings_revision_positive"):
+        parts.append("EPS/영업이익/매출 추정치 상향")
+    return ", ".join(parts) if parts else None
+
+
+def summarize_structural_growth_signal(summary: dict[str, Any]) -> str | None:
+    labels: list[str] = []
+    if summary.get("structural_growth_positive"):
+        labels.append("구조적 성장")
+    if summary.get("industry_cycle_positive"):
+        labels.append("산업 업황 개선")
+    if summary.get("supply_shortage_positive"):
+        labels.append("공급 부족")
+    if summary.get("asp_rising_positive"):
+        labels.append("ASP 상승")
+    if summary.get("capex_cycle_positive"):
+        labels.append("CAPEX 사이클")
+    if summary.get("backlog_positive"):
+        labels.append("수주잔고 확대")
+    if summary.get("new_customer_positive"):
+        labels.append("신규 고객")
+    if summary.get("market_share_positive"):
+        labels.append("시장점유율 확대")
+    labels = dedupe_preserve_order(labels)
+    return ", ".join(labels) if labels else None
+
+
+def summarize_valuation_risk_signal(summary: dict[str, Any]) -> str | None:
+    labels: list[str] = []
+    if summary.get("valuation_risk_negative"):
+        labels.append("valuation 부담")
+    if summary.get("front_running_negative"):
+        labels.append("주가 선반영")
+    if summary.get("peakout_negative"):
+        labels.append("피크아웃 우려")
+    if summary.get("margin_slowdown_negative"):
+        labels.append("마진 둔화")
+    if summary.get("demand_slowdown_negative"):
+        labels.append("수요 둔화")
+    labels = dedupe_preserve_order(labels)
+    return ", ".join(labels) if labels else None
+
+
+def compute_company_alpha(summary: dict[str, Any]) -> dict[str, Any]:
+    score = 50.0
+    positives: list[str] = list(summary.get("positive_factors") or [])
+    negatives: list[str] = list(summary.get("negative_factors") or [])
+
+    target_direction = clean_text(summary.get("target_price_revision_direction"))
+    target_rate = summary.get("target_price_revision_rate")
+    if target_direction == "up":
+        score += 10
+        positives.append("목표주가 상향")
+        if isinstance(target_rate, (int, float)) and target_rate > 0:
+            rate_bonus = min(float(target_rate), 30.0) * 0.35
+            score += rate_bonus
+            positives.append(f"목표주가 상향률 +{float(target_rate):.1f}%")
+    elif target_direction == "down":
+        score -= 9
+        negatives.append("목표주가 하향")
+
+    opinion_direction = clean_text(summary.get("investment_opinion_revision_direction"))
+    if opinion_direction == "up":
+        score += 8
+        positives.append("투자의견 상향")
+    elif opinion_direction == "down":
+        score -= 8
+        negatives.append("투자의견 하향")
+
+    if summary.get("earnings_revision_positive"):
+        score += 12
+        positives.append("EPS/영업이익/매출 추정치 상향")
+
+    if summary.get("structural_growth_positive"):
+        score += 10
+        positives.append("실적 개선이 구조적 성장에 기반")
+
+    cycle_bonus = 0
+    cycle_factors = [
+        ("industry_cycle_positive", "산업 업황 개선"),
+        ("supply_shortage_positive", "공급 부족"),
+        ("asp_rising_positive", "ASP 상승"),
+        ("capex_cycle_positive", "CAPEX cycle"),
+        ("backlog_positive", "수주잔고 확대"),
+        ("new_customer_positive", "신규 고객"),
+        ("market_share_positive", "시장점유율 확대"),
+    ]
+    for key, label in cycle_factors:
+        if summary.get(key):
+            cycle_bonus += 4
+            positives.append(label)
+    score += min(cycle_bonus, 20)
+
+    risk_penalties = [
+        ("valuation_risk_negative", 10, "valuation 부담"),
+        ("front_running_negative", 6, "주가 선반영"),
+        ("peakout_negative", 10, "피크아웃 우려"),
+        ("margin_slowdown_negative", 7, "마진 둔화"),
+        ("demand_slowdown_negative", 8, "수요 둔화"),
+    ]
+    for key, penalty, label in risk_penalties:
+        if summary.get(key):
+            score -= penalty
+            negatives.append(label)
+
+    final_score = clamp_score(score)
+    positives = dedupe_preserve_order(positives)
+    negatives = dedupe_preserve_order(negatives)
+
+    reason_parts: list[str] = []
+    if positives:
+        reason_parts.append("긍정: " + ", ".join(positives[:4]))
+    if negatives:
+        reason_parts.append("부정: " + ", ".join(negatives[:3]))
+
+    return {
+        "alpha_score": final_score,
+        "alpha_grade": alpha_grade_for(final_score),
+        "score_reason": " / ".join(reason_parts) if reason_parts else "명확한 alpha 신호가 제한적임",
+        "positive_factors": positives,
+        "negative_factors": negatives,
+        "revision_signal": summarize_revision_signal(summary),
+        "structural_growth_signal": summarize_structural_growth_signal(summary),
+        "valuation_risk_signal": summarize_valuation_risk_signal(summary),
+        "market_reaction_placeholder": normalize_market_reaction_placeholder(
+            summary.get("market_reaction_placeholder")
+        ),
+    }
+
+
+def enrich_summary(report: dict[str, Any], raw_summary: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(raw_summary)
+    defaults: dict[str, Any] = {
+        "report_type": report["category"],
+        "company_name": None,
+        "stock_code": None,
+        "industry_name": None,
+        "market_topic": None,
+        "investment_opinion": None,
+        "target_price": None,
+        "current_price": None,
+        "earnings_momentum": None,
+        "key_points": [],
+        "financial_metrics": [],
+        "valuation": None,
+        "risks": [],
+        "summary": "",
+        "target_price_revision_direction": None,
+        "target_price_revision_rate": None,
+        "investment_opinion_revision_direction": None,
+        "earnings_revision_positive": False,
+        "structural_growth_positive": False,
+        "industry_cycle_positive": False,
+        "supply_shortage_positive": False,
+        "asp_rising_positive": False,
+        "capex_cycle_positive": False,
+        "backlog_positive": False,
+        "new_customer_positive": False,
+        "market_share_positive": False,
+        "valuation_risk_negative": False,
+        "front_running_negative": False,
+        "peakout_negative": False,
+        "margin_slowdown_negative": False,
+        "demand_slowdown_negative": False,
+        "positive_factors": [],
+        "negative_factors": [],
+        "revision_signal": None,
+        "structural_growth_signal": None,
+        "valuation_risk_signal": None,
+        "score_reason": None,
+        "alpha_score": None,
+        "alpha_grade": None,
+        "market_reaction_placeholder": dict(MARKET_REACTION_TEMPLATE),
+    }
+    for key, default in defaults.items():
+        if key not in summary:
+            summary[key] = default if not isinstance(default, dict) else dict(default)
+
+    summary["report_type"] = report["category"]
+    summary["market_reaction_placeholder"] = normalize_market_reaction_placeholder(
+        summary.get("market_reaction_placeholder")
+    )
+
+    if report["category"] == "기업":
+        summary.update(compute_company_alpha(summary))
+    else:
+        summary["alpha_score"] = None
+        summary["alpha_grade"] = None
+        summary["score_reason"] = None
+        summary["positive_factors"] = dedupe_preserve_order(summary.get("positive_factors", []))
+        summary["negative_factors"] = dedupe_preserve_order(summary.get("negative_factors", []))
+        summary["revision_signal"] = None
+        summary["structural_growth_signal"] = None
+        summary["valuation_risk_signal"] = None
+    return summary
+
+
+def summary_has_scoring_fields(summary: dict[str, Any]) -> bool:
+    return SCORING_REQUIRED_KEYS.issubset(summary.keys())
+
+
 def build_prompt(report: dict[str, Any], pdf_text: str) -> str:
     if report["category"] == "기업":
         focus = (
             "기업 리포트다. 회사명, 종목코드, 투자의견, 목표주가, 실적 모멘텀, "
-            "핵심 포인트, 밸류에이션, 리스크를 정리하라."
+            "핵심 포인트, 밸류에이션, 리스크를 정리하라. "
+            "또한 목표주가/투자의견 상향 여부, 이익추정 상향 여부, 구조적 성장 여부, "
+            "업황/공급부족/ASP/CAPEX/수주잔고/신규고객/점유율 확대 신호와 "
+            "valuation 부담/선반영/피크아웃/마진둔화/수요둔화 리스크를 명시적으로 판단하라."
         )
     elif report["category"] == "산업":
         focus = (
             "산업 리포트다. 개별 종목 목표주가를 억지로 채우지 말고, 산업명/업황/수급/"
-            "정책/체인 이슈 중심으로 요약하라."
+            "정책/체인 이슈 중심으로 요약하라. 기업 점수용 revision/alpha 신호는 null 또는 false로 둬라."
         )
     else:
         focus = (
             "시장 리포트다. 개별 종목 의견을 억지로 만들지 말고, 시장 주제/매크로/수급/"
-            "전략 관점으로 요약하라."
+            "전략 관점으로 요약하라. 기업 점수용 revision/alpha 신호는 null 또는 false로 둬라."
         )
 
     return f"""
@@ -429,6 +764,18 @@ def to_excel_row(report: dict[str, Any], summary: dict[str, Any], pdf_path: Path
         "밸류에이션": summary.get("valuation"),
         "리스크": "\n".join(summary.get("risks", [])),
         "요약": summary.get("summary"),
+        "alpha_score": summary.get("alpha_score"),
+        "alpha_grade": summary.get("alpha_grade"),
+        "score_reason": summary.get("score_reason"),
+        "positive_factors": "\n".join(summary.get("positive_factors", [])),
+        "negative_factors": "\n".join(summary.get("negative_factors", [])),
+        "revision_signal": summary.get("revision_signal"),
+        "structural_growth_signal": summary.get("structural_growth_signal"),
+        "valuation_risk_signal": summary.get("valuation_risk_signal"),
+        "market_reaction_placeholder": json.dumps(
+            summary.get("market_reaction_placeholder", MARKET_REACTION_TEMPLATE),
+            ensure_ascii=False,
+        ),
         "pdf_path": str(pdf_path),
         "pdf_url": report["pdf_url"],
     }
@@ -560,6 +907,17 @@ def build_mobile_entry(
         "summary": summary.get("summary"),
         "key_points": summary.get("key_points", []),
         "risks": summary.get("risks", []),
+        "alpha_score": summary.get("alpha_score"),
+        "alpha_grade": summary.get("alpha_grade"),
+        "score_reason": summary.get("score_reason"),
+        "positive_factors": summary.get("positive_factors", []),
+        "negative_factors": summary.get("negative_factors", []),
+        "revision_signal": summary.get("revision_signal"),
+        "structural_growth_signal": summary.get("structural_growth_signal"),
+        "valuation_risk_signal": summary.get("valuation_risk_signal"),
+        "market_reaction_placeholder": summary.get(
+            "market_reaction_placeholder", dict(MARKET_REACTION_TEMPLATE)
+        ),
         "live_price": None,
         "live_price_change": None,
         "live_price_rate": None,
@@ -592,8 +950,7 @@ def process_report(
             "보수적으로 요약하고 추정하지 마십시오."
         )
 
-    summary = summarize_report(client, report, pdf_text)
-    summary["report_type"] = category
+    summary = enrich_summary(report, summarize_report(client, report, pdf_text))
 
     json_payload = {
         "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -664,6 +1021,14 @@ def render_mobile_html(
       font-size: 14px;
       margin-bottom: 14px;
       line-height: 1.5;
+    }}
+    .credit {{
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: -8px;
+      margin-bottom: 14px;
+      letter-spacing: 0.02em;
+      font-weight: 700;
     }}
     .toolbar {{
       display: flex;
@@ -793,6 +1158,17 @@ def render_mobile_html(
       font-weight: 600;
       font-size: 14px;
     }}
+    .links button {{
+      border: 0;
+      background: transparent;
+      color: var(--accent-2);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 0;
+      cursor: pointer;
+      font-family: inherit;
+    }}
     .group-head {{
       display: flex;
       justify-content: space-between;
@@ -840,6 +1216,28 @@ def render_mobile_html(
       gap: 8px;
       margin: 10px 0 14px;
     }}
+    .score-box {{
+      min-width: 160px;
+      background: linear-gradient(180deg, #edf7f1 0%, #e3f3e9 100%);
+      border: 1px solid rgba(0,95,115,0.18);
+      border-radius: 18px;
+      padding: 12px 14px;
+    }}
+    .score-grade {{
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }}
+    .score-main {{
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.1;
+    }}
+    .score-sub {{
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }}
     .pill {{
       background: #f3f7f8;
       color: var(--accent);
@@ -885,13 +1283,36 @@ def render_mobile_html(
       font-size: 16px;
       font-weight: 700;
     }}
+    .factor-grid {{
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .factor-box {{
+      border: 1px solid rgba(216,205,183,0.9);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.7);
+    }}
+    .factor-title {{
+      margin: 0 0 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--muted);
+    }}
+    .factor-text {{
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.5;
+    }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <section class="hero">
-      <h1>한경 컨센서스 일일 브리프</h1>
-      <div class="sub" id="subline">대상 일자: __TARGET_DATE__ · 기업은 종목별로 묶어서 보고, 현재가는 py stocks.py 실행 시점 최신값을 함께 표시함</div>
+      <h1>한경 컨센서스 데일리</h1>
+      <div class="sub" id="subline">대상 일자: __TARGET_DATE__</div>
+      <div class="credit">Built by Kujah with Codex</div>
       <div class="toolbar cluster">
         <div class="toolbar" id="modes"></div>
         <div class="date-box">
@@ -936,7 +1357,8 @@ def render_mobile_html(
 
     function groupedData(items) {
       const groups = new Map();
-      const standalone = [];
+      const industry = [];
+      const market = [];
 
       for (const item of items) {
         if (item.category === "기업" && item.stock_code) {
@@ -949,12 +1371,21 @@ def render_mobile_html(
               live_price_change: item.live_price_change,
               live_price_rate: item.live_price_rate,
               live_price_as_of: item.live_price_as_of,
+              best_alpha_score: item.alpha_score,
+              best_alpha_grade: item.alpha_grade,
               reports: [],
             });
           }
-          groups.get(key).reports.push(item);
+          const group = groups.get(key);
+          if ((item.alpha_score || -1) > (group.best_alpha_score || -1)) {
+            group.best_alpha_score = item.alpha_score;
+            group.best_alpha_grade = item.alpha_grade;
+          }
+          group.reports.push(item);
+        } else if (item.category === "산업") {
+          industry.push(item);
         } else {
-          standalone.push(item);
+          market.push(item);
         }
       }
 
@@ -962,18 +1393,22 @@ def render_mobile_html(
         .map((group) => ({
           ...group,
           reports: group.reports.sort((a, b) => {
+            const scoreDiff = (b.alpha_score || -1) - (a.alpha_score || -1);
+            if (scoreDiff !== 0) return scoreDiff;
             const sourceA = a.source || "";
             const sourceB = b.source || "";
             return sourceA.localeCompare(sourceB, "ko");
           }),
         }))
         .sort((a, b) => {
+          const scoreDiff = (b.best_alpha_score || -1) - (a.best_alpha_score || -1);
+          if (scoreDiff !== 0) return scoreDiff;
           const countDiff = b.reports.length - a.reports.length;
           if (countDiff !== 0) return countDiff;
           return (a.company_name || "").localeCompare(b.company_name || "", "ko");
         });
 
-      return { groupedCompanies, standalone };
+      return { groupedCompanies, industry, market };
     }
 
     function renderModes() {
@@ -1052,9 +1487,69 @@ def render_mobile_html(
       `;
     }
 
+    function renderAlphaBox(item) {
+      if (item.alpha_score === null || item.alpha_score === undefined) return "";
+      return `
+        <div class="score-box">
+          <div class="score-grade">Alpha ${safe(item.alpha_grade || "-")}</div>
+          <div class="score-main">${safe(item.alpha_score)}</div>
+          <div class="score-sub">${safe(item.score_reason || "")}</div>
+        </div>
+      `;
+    }
+
+    function stockWebUrl(stockCode) {
+      if (!stockCode) return "";
+      return `https://finance.naver.com/item/main.naver?code=${encodeURIComponent(stockCode)}`;
+    }
+
+    async function copyStockCode(stockCode) {
+      if (!stockCode) return;
+      try {
+        await navigator.clipboard.writeText(String(stockCode));
+      } catch (error) {
+        const textarea = document.createElement("textarea");
+        textarea.value = String(stockCode);
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      alert(`종목코드 복사: ${stockCode}`);
+    }
+
+    function renderFactorSections(item) {
+      if (item.category !== "기업") return "";
+      const sections = [];
+      if (item.revision_signal) {
+        sections.push(`<div class="factor-box"><div class="factor-title">Revision Signal</div><p class="factor-text">${safe(item.revision_signal)}</p></div>`);
+      }
+      if (item.structural_growth_signal) {
+        sections.push(`<div class="factor-box"><div class="factor-title">Structural Growth</div><p class="factor-text">${safe(item.structural_growth_signal)}</p></div>`);
+      }
+      if (item.valuation_risk_signal) {
+        sections.push(`<div class="factor-box"><div class="factor-title">Valuation / Risk</div><p class="factor-text">${safe(item.valuation_risk_signal)}</p></div>`);
+      }
+      const positiveText = (item.positive_factors || []).map((value) => `+ ${safe(value)}`).join("<br>");
+      const negativeText = (item.negative_factors || []).map((value) => `- ${safe(value)}`).join("<br>");
+      if (positiveText) {
+        sections.push(`<div class="factor-box"><div class="factor-title">Positive Factors</div><p class="factor-text">${positiveText}</p></div>`);
+      }
+      if (negativeText) {
+        sections.push(`<div class="factor-box"><div class="factor-title">Negative Factors</div><p class="factor-text">${negativeText}</p></div>`);
+      }
+      if (item.market_reaction_placeholder) {
+        sections.push(`<div class="factor-box"><div class="factor-title">Market Reaction</div><p class="factor-text">D+1 / D+5 / D+20 추후 연결 예정</p></div>`);
+      }
+      return sections.length ? `<div class="factor-grid">${sections.join("")}</div>` : "";
+    }
+
     function renderGrouped(items) {
       const root = document.getElementById("list");
-      const { groupedCompanies, standalone } = groupedData(items);
+      const { groupedCompanies, industry, market } = groupedData(items);
 
       const groupCards = groupedCompanies.map((group) => {
         const uniqueSources = [...new Set(group.reports.map((report) => report.source).filter(Boolean))];
@@ -1070,12 +1565,18 @@ def render_mobile_html(
                   <div>${safe(report.title)}</div>
                   <div class="report-brief">${safe(report.source)} · ${safe(report.author)} · ${safe(report.investment_opinion)} ${safe(report.target_price)}</div>
                 </div>
-                <div class="badge">#${safe(report.report_idx)}</div>
+                <div>
+                  ${report.alpha_score !== null && report.alpha_score !== undefined ? `<div class="badge">${safe(report.alpha_grade || "-")} ${safe(report.alpha_score)}</div>` : ""}
+                  <div class="badge">#${safe(report.report_idx)}</div>
+                </div>
               </summary>
               <div class="report-body">
                 <p class="summary">${safe(report.summary)}</p>
                 ${pointItems ? `<ul class="points">${pointItems}</ul>` : ""}
+                ${renderFactorSections(report)}
                 <div class="links">
+                  ${report.stock_code ? `<button type="button" data-copy-stock="${safe(report.stock_code)}">종목코드 복사</button>` : ""}
+                  ${report.stock_code ? `<a href="${stockWebUrl(report.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>` : ""}
                   <a href="${safe(report.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
                   <a href="${safe(report.json_path)}" target="_blank" rel="noreferrer">JSON</a>
                   <a href="${safe(report.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
@@ -1090,11 +1591,13 @@ def render_mobile_html(
             <div class="group-head">
               <div>
                 <h2 class="group-title">${safe(group.company_name)}</h2>
-                <div class="group-sub">종목코드 ${safe(group.stock_code)} · 리포트 ${group.reports.length}건</div>
+                <div class="group-sub">종목코드 ${safe(group.stock_code)} · 리포트 ${group.reports.length}건 · 최고점 ${safe(group.best_alpha_grade || "-")} ${safe(group.best_alpha_score ?? "")}</div>
               </div>
               ${renderPriceBox(group)}
             </div>
             <div class="group-meta">
+              ${group.stock_code ? `<span class="pill"><button type="button" data-copy-stock="${safe(group.stock_code)}">종목코드 복사</button></span>` : ""}
+              ${group.stock_code ? `<span class="pill"><a href="${stockWebUrl(group.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a></span>` : ""}
               ${uniqueSources.slice(0, 6).map((source) => `<span class="pill">${safe(source)}</span>`).join("")}
               ${opinions.slice(0, 4).map((opinion) => `<span class="pill">의견 ${safe(opinion)}</span>`).join("")}
               ${targets.slice(0, 4).map((target) => `<span class="pill">목표가 ${safe(target)}</span>`).join("")}
@@ -1104,10 +1607,10 @@ def render_mobile_html(
         `;
       }).join("");
 
-      const standaloneCards = standalone.length
+      const renderStandaloneSection = (title, entries) => entries.length
         ? `
-          <div class="section-title">산업/시장 리포트</div>
-          ${standalone.map((item) => `
+          <div class="section-title">${title}</div>
+          ${entries.map((item) => `
             <article class="card">
               <div class="row">
                 <span class="badge">${safe(item.category)}</span>
@@ -1117,6 +1620,7 @@ def render_mobile_html(
               <h2 class="title">${safe(item.title)}</h2>
               <div class="meta">작성자 ${safe(item.author)} · 출처 ${safe(item.source)}${item.market_topic ? ` · 주제 ${safe(item.market_topic)}` : ""}${item.industry_name ? ` · 산업 ${safe(item.industry_name)}` : ""}</div>
               <p class="summary">${safe(item.summary)}</p>
+              ${renderFactorSections(item)}
               <div class="links">
                 <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
                 <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
@@ -1127,7 +1631,9 @@ def render_mobile_html(
         `
         : "";
 
-      root.innerHTML = groupCards + standaloneCards;
+      root.innerHTML = groupCards
+        + renderStandaloneSection("산업 리포트", industry)
+        + renderStandaloneSection("시장 리포트", market);
     }
 
     function renderList(items) {
@@ -1142,6 +1648,7 @@ def render_mobile_html(
           item.market_topic ? `주제 ${item.market_topic}` : "",
           item.investment_opinion ? `의견 ${item.investment_opinion}` : "",
           item.target_price ? `목표가 ${item.target_price}` : "",
+          item.alpha_score !== null && item.alpha_score !== undefined ? `Alpha ${item.alpha_grade || "-"} ${item.alpha_score}` : "",
           item.live_price ? `현재가 ${item.live_price}원` : "",
         ].filter(Boolean).join(" · ");
         const points = (item.key_points || []).slice(0, 4).map((point) => `<li>${safe(point)}</li>`).join("");
@@ -1154,9 +1661,13 @@ def render_mobile_html(
             </div>
             <h2 class="title">${safe(item.title)}</h2>
             <div class="meta">${meta}</div>
+            ${renderAlphaBox(item)}
             <p class="summary">${safe(item.summary)}</p>
             ${points ? `<ul class="points">${points}</ul>` : ""}
+            ${renderFactorSections(item)}
             <div class="links">
+              ${item.stock_code ? `<button type="button" data-copy-stock="${safe(item.stock_code)}">종목코드 복사</button>` : ""}
+              ${item.stock_code ? `<a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>` : ""}
               <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
               <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
               <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
@@ -1198,6 +1709,13 @@ def render_mobile_html(
       render();
     }
 
+    document.addEventListener("click", async (event) => {
+      const trigger = event.target.closest("[data-copy-stock]");
+      if (!trigger) return;
+      event.preventDefault();
+      await copyStockCode(trigger.getAttribute("data-copy-stock"));
+    });
+
     render();
   </script>
 </body>
@@ -1225,7 +1743,11 @@ def save_mobile_outputs(target_date: str, entries: list[dict[str, Any]]) -> None
     save_json(payload, MOBILE_ROOT / "latest.json")
     save_json(payload, MOBILE_ROOT / f"{target_date}.json")
     available_dates = sorted(
-        {path.stem for path in archive_root.glob("*.json") if path.is_file()},
+        {
+            path.stem
+            for path in archive_root.glob("*.json")
+            if path.is_file() and path.stem != "index"
+        },
         reverse=True,
     )
     save_json(
@@ -1270,13 +1792,20 @@ def main() -> None:
             if report_idx in existing_ids and json_path.exists() and pdf_path.exists():
                 try:
                     payload = json.loads(json_path.read_text(encoding="utf-8"))
-                    mobile_entries.append(
-                        build_mobile_entry(report, payload["summary"], pdf_path, json_path)
-                    )
+                    stored_summary = payload.get("summary", {})
+                    if summary_has_scoring_fields(stored_summary):
+                        normalized_summary = enrich_summary(report, stored_summary)
+                        if normalized_summary != stored_summary:
+                            payload["summary"] = normalized_summary
+                            save_json(payload, json_path)
+                        mobile_entries.append(
+                            build_mobile_entry(report, normalized_summary, pdf_path, json_path)
+                        )
+                        print(f"[{category}][{index}/{len(reports)}] 중복 스킵: {report_idx}")
+                        continue
+                    print(f"[{category}][{index}/{len(reports)}] 재점수화 시작: {report_idx}")
                 except Exception:
-                    pass
-                print(f"[{category}][{index}/{len(reports)}] 중복 스킵: {report_idx}")
-                continue
+                    print(f"[{category}][{index}/{len(reports)}] 기존 JSON 재사용 실패, 재처리: {report_idx}")
 
             try:
                 print(f"[{category}][{index}/{len(reports)}] 처리 시작: {report_idx}")
