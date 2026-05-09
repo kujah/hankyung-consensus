@@ -464,6 +464,78 @@ def append_rows_to_excel(rows: list[dict[str, Any]], excel_path: Path) -> int:
     return len(final_df)
 
 
+def fetch_current_quote(session: requests.Session, stock_code: str) -> dict[str, Any]:
+    response = session.get(
+        "https://finance.naver.com/item/main.naver",
+        params={"code": stock_code},
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    price_node = soup.select_one("div.rate_info div.today p.no_today span.blind")
+    if price_node is None:
+        raise ValueError(f"Failed to parse current price for stock {stock_code}")
+
+    diff_nodes = soup.select("div.rate_info div.today p.no_exday span.blind")
+    quote_as_of = None
+    for node in soup.select("div.description span"):
+        text = clean_text(node.get_text(" ", strip=True))
+        if "기준" in text:
+            quote_as_of = text
+            break
+
+    direction = None
+    icon = soup.select_one("div.rate_info div.today p.no_exday span.ico")
+    if icon is not None:
+        classes = icon.get("class", [])
+        for candidate in ("up", "down", "same"):
+            if candidate in classes:
+                direction = candidate
+                break
+
+    change_amount = clean_text(diff_nodes[0].get_text(" ", strip=True)) if len(diff_nodes) >= 1 else None
+    change_rate = clean_text(diff_nodes[1].get_text(" ", strip=True)) if len(diff_nodes) >= 2 else None
+    if change_rate and not change_rate.endswith("%"):
+        change_rate = f"{change_rate}%"
+
+    return {
+        "live_price": clean_text(price_node.get_text(" ", strip=True)),
+        "live_price_change": change_amount,
+        "live_price_rate": change_rate,
+        "live_price_direction": direction,
+        "live_price_as_of": quote_as_of,
+    }
+
+
+def attach_current_quotes(
+    session: requests.Session,
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cache: dict[str, dict[str, Any]] = {}
+    enriched: list[dict[str, Any]] = []
+
+    for entry in entries:
+        enriched_entry = dict(entry)
+        stock_code = clean_text(entry.get("stock_code"))
+        if stock_code:
+            if stock_code not in cache:
+                try:
+                    cache[stock_code] = fetch_current_quote(session, stock_code)
+                except Exception:
+                    cache[stock_code] = {
+                        "live_price": None,
+                        "live_price_change": None,
+                        "live_price_rate": None,
+                        "live_price_direction": None,
+                        "live_price_as_of": None,
+                    }
+            enriched_entry.update(cache[stock_code])
+        enriched.append(enriched_entry)
+
+    return enriched
+
+
 def build_mobile_entry(
     report: dict[str, Any],
     summary: dict[str, Any],
@@ -488,6 +560,11 @@ def build_mobile_entry(
         "summary": summary.get("summary"),
         "key_points": summary.get("key_points", []),
         "risks": summary.get("risks", []),
+        "live_price": None,
+        "live_price_change": None,
+        "live_price_rate": None,
+        "live_price_direction": None,
+        "live_price_as_of": None,
         "pdf_path": relative_pdf.as_posix(),
         "json_path": relative_json.as_posix(),
         "pdf_url": report["pdf_url"],
@@ -512,7 +589,7 @@ def process_report(
         pdf_text = (
             "PDF 본문 텍스트를 추출하지 못했습니다. "
             "제목, 작성자, 제공출처, 분류, 목록 메타데이터만 기반으로 "
-            "보수적으로 요약하고 추정은 하지 마십시오."
+            "보수적으로 요약하고 추정하지 마십시오."
         )
 
     summary = summarize_report(client, report, pdf_text)
@@ -531,8 +608,13 @@ def process_report(
     return excel_row, mobile_entry
 
 
-def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
+def render_mobile_html(
+    target_date: str,
+    entries: list[dict[str, Any]],
+    available_dates: list[str],
+) -> str:
     payload = json.dumps(entries, ensure_ascii=False)
+    dates_payload = json.dumps(available_dates, ensure_ascii=False)
     template = """<!doctype html>
 <html lang="ko">
 <head>
@@ -560,12 +642,12 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
       color: var(--ink);
     }}
     .wrap {{
-      max-width: 920px;
+      max-width: 960px;
       margin: 0 auto;
       padding: 16px 14px 40px;
     }}
     .hero {{
-      background: rgba(255,255,255,0.72);
+      background: rgba(255,255,255,0.76);
       backdrop-filter: blur(8px);
       border: 1px solid rgba(216,205,183,0.9);
       border-radius: 24px;
@@ -581,12 +663,21 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
       color: var(--muted);
       font-size: 14px;
       margin-bottom: 14px;
+      line-height: 1.5;
     }}
     .toolbar {{
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
       margin-bottom: 8px;
+    }}
+    .toolbar.secondary {{
+      margin-top: 10px;
+    }}
+    .toolbar.cluster {{
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
     }}
     .toolbar button {{
       border: 1px solid var(--line);
@@ -601,6 +692,23 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
       background: var(--accent);
       color: white;
       border-color: var(--accent);
+    }}
+    .date-box {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .date-box select {{
+      border: 1px solid var(--line);
+      background: var(--paper);
+      color: var(--ink);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 14px;
+      min-width: 148px;
     }}
     .stats {{
       display: flex;
@@ -617,14 +725,21 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
     .list {{
       margin-top: 14px;
       display: grid;
-      gap: 12px;
+      gap: 14px;
     }}
     .card {{
-      background: rgba(255,255,255,0.82);
+      background: rgba(255,255,255,0.84);
       border: 1px solid rgba(216,205,183,0.9);
       border-radius: 20px;
       padding: 16px;
       box-shadow: 0 8px 20px rgba(71, 61, 44, 0.06);
+    }}
+    .group-card {{
+      background: rgba(255,255,255,0.92);
+      border: 1px solid rgba(0,95,115,0.14);
+      border-radius: 24px;
+      padding: 18px;
+      box-shadow: 0 10px 24px rgba(0,95,115,0.08);
     }}
     .row {{
       display: flex;
@@ -678,63 +793,346 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
       font-weight: 600;
       font-size: 14px;
     }}
+    .group-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }}
+    .group-title {{
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+    }}
+    .group-sub {{
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-top: 6px;
+    }}
+    .price-box {{
+      min-width: 220px;
+      background: linear-gradient(180deg, #fff8ed 0%, #fff2e1 100%);
+      border: 1px solid rgba(202,103,2,0.18);
+      border-radius: 18px;
+      padding: 12px 14px;
+    }}
+    .price-label {{
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .price-main {{
+      font-size: 24px;
+      font-weight: 700;
+      line-height: 1.1;
+    }}
+    .price-change {{
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }}
+    .group-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 14px;
+    }}
+    .pill {{
+      background: #f3f7f8;
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .report-stack {{
+      display: grid;
+      gap: 10px;
+    }}
+    details.report-detail {{
+      border: 1px solid rgba(216,205,183,0.9);
+      border-radius: 16px;
+      padding: 12px 14px;
+      background: rgba(250,247,241,0.96);
+    }}
+    details.report-detail summary {{
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      font-weight: 600;
+    }}
+    details.report-detail summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .report-brief {{
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 2px;
+      font-weight: 400;
+      line-height: 1.45;
+    }}
+    .report-body {{
+      margin-top: 12px;
+    }}
+    .section-title {{
+      margin: 2px 0;
+      font-size: 16px;
+      font-weight: 700;
+    }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <section class="hero">
       <h1>한경 컨센서스 일일 브리프</h1>
-      <div class="sub">대상 일자: __TARGET_DATE__ · 이 파일 하나로 휴대폰 브라우저에서도 확인할 수 있게 정리됨</div>
-      <div class="toolbar" id="filters"></div>
+      <div class="sub" id="subline">대상 일자: __TARGET_DATE__ · 기업은 종목별로 묶어서 보고, 현재가는 py stocks.py 실행 시점 최신값을 함께 표시함</div>
+      <div class="toolbar cluster">
+        <div class="toolbar" id="modes"></div>
+        <div class="date-box">
+          <span>브리프 날짜</span>
+          <select id="date-select"></select>
+        </div>
+      </div>
+      <div class="toolbar secondary" id="filters"></div>
       <div class="stats" id="stats"></div>
     </section>
     <section class="list" id="list"></section>
   </div>
   <script>
-    const reports = __PAYLOAD__;
+    const initialReports = __PAYLOAD__;
+    const availableDates = __DATES_PAYLOAD__;
     const categories = ["전체", "기업", "산업", "시장"];
+    const modes = [
+      { key: "grouped", label: "종목 묶음" },
+      { key: "reports", label: "전체 리포트" },
+    ];
     let current = "전체";
+    let currentMode = "grouped";
+    let currentDate = "__TARGET_DATE__";
+    let reports = initialReports;
+    const reportCache = new Map([[currentDate, initialReports]]);
 
-    function countByCategory(items) {{
-      const counts = {{}};
+    function safe(value) {
+      return value ? String(value) : "";
+    }
+
+    function filteredReports() {
+      return current === "전체"
+        ? reports
+        : reports.filter((item) => item.category === current);
+    }
+
+    function countByCategory(items) {
+      const counts = {};
       for (const item of items) counts[item.category] = (counts[item.category] || 0) + 1;
       return counts;
-    }}
+    }
 
-    function renderFilters() {{
+    function groupedData(items) {
+      const groups = new Map();
+      const standalone = [];
+
+      for (const item of items) {
+        if (item.category === "기업" && item.stock_code) {
+          const key = item.stock_code;
+          if (!groups.has(key)) {
+            groups.set(key, {
+              stock_code: item.stock_code,
+              company_name: item.company_name || item.title,
+              live_price: item.live_price,
+              live_price_change: item.live_price_change,
+              live_price_rate: item.live_price_rate,
+              live_price_as_of: item.live_price_as_of,
+              reports: [],
+            });
+          }
+          groups.get(key).reports.push(item);
+        } else {
+          standalone.push(item);
+        }
+      }
+
+      const groupedCompanies = Array.from(groups.values())
+        .map((group) => ({
+          ...group,
+          reports: group.reports.sort((a, b) => {
+            const sourceA = a.source || "";
+            const sourceB = b.source || "";
+            return sourceA.localeCompare(sourceB, "ko");
+          }),
+        }))
+        .sort((a, b) => {
+          const countDiff = b.reports.length - a.reports.length;
+          if (countDiff !== 0) return countDiff;
+          return (a.company_name || "").localeCompare(b.company_name || "", "ko");
+        });
+
+      return { groupedCompanies, standalone };
+    }
+
+    function renderModes() {
+      const root = document.getElementById("modes");
+      root.innerHTML = "";
+      for (const mode of modes) {
+        const button = document.createElement("button");
+        button.textContent = mode.label;
+        if (mode.key === currentMode) button.classList.add("active");
+        button.onclick = () => {
+          currentMode = mode.key;
+          render();
+        };
+        root.appendChild(button);
+      }
+    }
+
+    function renderDateOptions() {
+      const root = document.getElementById("date-select");
+      root.innerHTML = availableDates
+        .map((date) => `<option value="${safe(date)}"${date === currentDate ? " selected" : ""}>${safe(date)}</option>`)
+        .join("");
+      root.onchange = async (event) => {
+        await switchDate(event.target.value);
+      };
+    }
+
+    function renderFilters() {
       const root = document.getElementById("filters");
       root.innerHTML = "";
-      for (const category of categories) {{
+      for (const category of categories) {
         const button = document.createElement("button");
         button.textContent = category;
         if (category === current) button.classList.add("active");
-        button.onclick = () => {{
+        button.onclick = () => {
           current = category;
           render();
-        }};
+        };
         root.appendChild(button);
-      }}
-    }}
+      }
+    }
 
-    function renderStats(items) {{
-      const counts = countByCategory(reports);
+    function renderStats(items) {
+      const counts = countByCategory(items);
+      const grouped = groupedData(items);
       const root = document.getElementById("stats");
       const parts = [
         ["표시 중", items.length + "건"],
+        ["묶인 종목", grouped.groupedCompanies.length + "개"],
         ["기업", (counts["기업"] || 0) + "건"],
         ["산업", (counts["산업"] || 0) + "건"],
         ["시장", (counts["시장"] || 0) + "건"],
       ];
-      root.innerHTML = parts.map(([k, v]) => `<div class="stat">${{k}}: ${{v}}</div>`).join("");
-    }}
+      root.innerHTML = parts.map(([k, v]) => `<div class="stat">${k}: ${v}</div>`).join("");
+      document.getElementById("subline").textContent =
+        `대상 일자: ${currentDate} · 기업은 종목별로 묶어서 보고, 현재가는 py stocks.py 실행 시점 최신값을 함께 표시함`;
+    }
 
-    function safe(value) {{
-      return value ? String(value) : "";
-    }}
+    function renderPriceBox(group) {
+      if (!group.live_price) {
+        return `
+          <div class="price-box">
+            <div class="price-label">현재가</div>
+            <div class="price-main">조회 실패</div>
+          </div>
+        `;
+      }
 
-    function renderList(items) {{
+      const change = [safe(group.live_price_change), safe(group.live_price_rate)].filter(Boolean).join(" / ");
+      return `
+        <div class="price-box">
+          <div class="price-label">현재가 ${safe(group.live_price_as_of)}</div>
+          <div class="price-main">${safe(group.live_price)}원</div>
+          <div class="price-change">${change}</div>
+        </div>
+      `;
+    }
+
+    function renderGrouped(items) {
       const root = document.getElementById("list");
-      root.innerHTML = items.map((item) => {{
+      const { groupedCompanies, standalone } = groupedData(items);
+
+      const groupCards = groupedCompanies.map((group) => {
+        const uniqueSources = [...new Set(group.reports.map((report) => report.source).filter(Boolean))];
+        const targets = [...new Set(group.reports.map((report) => report.target_price).filter(Boolean))];
+        const opinions = [...new Set(group.reports.map((report) => report.investment_opinion).filter(Boolean))];
+
+        const reportsHtml = group.reports.map((report) => {
+          const pointItems = (report.key_points || []).slice(0, 4).map((point) => `<li>${safe(point)}</li>`).join("");
+          return `
+            <details class="report-detail">
+              <summary>
+                <div>
+                  <div>${safe(report.title)}</div>
+                  <div class="report-brief">${safe(report.source)} · ${safe(report.author)} · ${safe(report.investment_opinion)} ${safe(report.target_price)}</div>
+                </div>
+                <div class="badge">#${safe(report.report_idx)}</div>
+              </summary>
+              <div class="report-body">
+                <p class="summary">${safe(report.summary)}</p>
+                ${pointItems ? `<ul class="points">${pointItems}</ul>` : ""}
+                <div class="links">
+                  <a href="${safe(report.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
+                  <a href="${safe(report.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+                  <a href="${safe(report.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
+                </div>
+              </div>
+            </details>
+          `;
+        }).join("");
+
+        return `
+          <article class="group-card">
+            <div class="group-head">
+              <div>
+                <h2 class="group-title">${safe(group.company_name)}</h2>
+                <div class="group-sub">종목코드 ${safe(group.stock_code)} · 리포트 ${group.reports.length}건</div>
+              </div>
+              ${renderPriceBox(group)}
+            </div>
+            <div class="group-meta">
+              ${uniqueSources.slice(0, 6).map((source) => `<span class="pill">${safe(source)}</span>`).join("")}
+              ${opinions.slice(0, 4).map((opinion) => `<span class="pill">의견 ${safe(opinion)}</span>`).join("")}
+              ${targets.slice(0, 4).map((target) => `<span class="pill">목표가 ${safe(target)}</span>`).join("")}
+            </div>
+            <div class="report-stack">${reportsHtml}</div>
+          </article>
+        `;
+      }).join("");
+
+      const standaloneCards = standalone.length
+        ? `
+          <div class="section-title">산업/시장 리포트</div>
+          ${standalone.map((item) => `
+            <article class="card">
+              <div class="row">
+                <span class="badge">${safe(item.category)}</span>
+                <span class="badge">${safe(item.published_at)}</span>
+                <span class="badge">#${safe(item.report_idx)}</span>
+              </div>
+              <h2 class="title">${safe(item.title)}</h2>
+              <div class="meta">작성자 ${safe(item.author)} · 출처 ${safe(item.source)}${item.market_topic ? ` · 주제 ${safe(item.market_topic)}` : ""}${item.industry_name ? ` · 산업 ${safe(item.industry_name)}` : ""}</div>
+              <p class="summary">${safe(item.summary)}</p>
+              <div class="links">
+                <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
+                <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+                <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
+              </div>
+            </article>
+          `).join("")}
+        `
+        : "";
+
+      root.innerHTML = groupCards + standaloneCards;
+    }
+
+    function renderList(items) {
+      const root = document.getElementById("list");
+      root.innerHTML = items.map((item) => {
         const meta = [
           item.author ? `작성자 ${item.author}` : "",
           item.source ? `출처 ${item.source}` : "",
@@ -744,35 +1142,61 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
           item.market_topic ? `주제 ${item.market_topic}` : "",
           item.investment_opinion ? `의견 ${item.investment_opinion}` : "",
           item.target_price ? `목표가 ${item.target_price}` : "",
+          item.live_price ? `현재가 ${item.live_price}원` : "",
         ].filter(Boolean).join(" · ");
-        const points = (item.key_points || []).slice(0, 4).map((point) => `<li>${{safe(point)}}</li>`).join("");
+        const points = (item.key_points || []).slice(0, 4).map((point) => `<li>${safe(point)}</li>`).join("");
         return `
           <article class="card">
             <div class="row">
-              <span class="badge">${{safe(item.category)}}</span>
-              <span class="badge">${{safe(item.published_at)}}</span>
-              <span class="badge">#${{safe(item.report_idx)}}</span>
+              <span class="badge">${safe(item.category)}</span>
+              <span class="badge">${safe(item.published_at)}</span>
+              <span class="badge">#${safe(item.report_idx)}</span>
             </div>
-            <h2 class="title">${{safe(item.title)}}</h2>
-            <div class="meta">${{meta}}</div>
-            <p class="summary">${{safe(item.summary)}}</p>
-            ${{points ? `<ul class="points">${{points}}</ul>` : ""}}
+            <h2 class="title">${safe(item.title)}</h2>
+            <div class="meta">${meta}</div>
+            <p class="summary">${safe(item.summary)}</p>
+            ${points ? `<ul class="points">${points}</ul>` : ""}
             <div class="links">
-              <a href="${{safe(item.pdf_path)}}" target="_blank" rel="noreferrer">PDF</a>
-              <a href="${{safe(item.json_path)}}" target="_blank" rel="noreferrer">JSON</a>
-              <a href="${{safe(item.pdf_url)}}" target="_blank" rel="noreferrer">원문 링크</a>
+              <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
+              <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+              <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
             </div>
           </article>
         `;
-      }}).join("");
-    }}
+      }).join("");
+    }
 
-    function render() {{
+    function render() {
+      renderModes();
+      renderDateOptions();
       renderFilters();
-      const items = current === "전체" ? reports : reports.filter((item) => item.category === current);
+      const items = filteredReports();
       renderStats(items);
-      renderList(items);
-    }}
+      if (currentMode === "grouped") {
+        renderGrouped(items);
+      } else {
+        renderList(items);
+      }
+    }
+
+    async function switchDate(nextDate) {
+      if (!nextDate || nextDate === currentDate) return;
+      if (!reportCache.has(nextDate)) {
+        try {
+          const response = await fetch(`./archive/${nextDate}.json`, { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const payload = await response.json();
+          reportCache.set(nextDate, payload.reports || []);
+        } catch (error) {
+          alert(`브리프를 불러오지 못했습니다: ${nextDate}`);
+          renderDateOptions();
+          return;
+        }
+      }
+      currentDate = nextDate;
+      reports = reportCache.get(nextDate) || [];
+      render();
+    }
 
     render();
   </script>
@@ -782,21 +1206,34 @@ def render_mobile_html(target_date: str, entries: list[dict[str, Any]]) -> str:
     rendered = (
         template.replace("__TARGET_DATE__", html.escape(target_date))
         .replace("__PAYLOAD__", payload)
+        .replace("__DATES_PAYLOAD__", dates_payload)
     )
     return rendered.replace("{{", "{").replace("}}", "}")
 
 
 def save_mobile_outputs(target_date: str, entries: list[dict[str, Any]]) -> None:
+    enriched_entries = attach_current_quotes(build_session(), entries)
+    archive_root = MOBILE_ROOT / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
     payload = {
         "target_date": target_date,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "count": len(entries),
-        "reports": entries,
+        "count": len(enriched_entries),
+        "reports": enriched_entries,
     }
+    save_json(payload, archive_root / f"{target_date}.json")
     save_json(payload, MOBILE_ROOT / "latest.json")
     save_json(payload, MOBILE_ROOT / f"{target_date}.json")
+    available_dates = sorted(
+        {path.stem for path in archive_root.glob("*.json") if path.is_file()},
+        reverse=True,
+    )
+    save_json(
+        {"latest": target_date, "available_dates": available_dates},
+        archive_root / "index.json",
+    )
     (MOBILE_ROOT / "index.html").write_text(
-        render_mobile_html(target_date, entries),
+        render_mobile_html(target_date, enriched_entries, available_dates),
         encoding="utf-8",
     )
 
