@@ -20,6 +20,34 @@
 3. In repository settings, enable Pages and set the source to `GitHub Actions`.
 4. Run the workflow once with `workflow_dispatch` to verify permissions and the first deployment.
 
+## Optional KakaoTalk notification setup
+
+If you want the workflow to send a KakaoTalk message to your own chat room when it finishes, add these repository secrets:
+
+- `KAKAO_REST_API_KEY`
+- `KAKAO_CLIENT_SECRET`
+- `KAKAO_REFRESH_TOKEN`
+
+Required Kakao app setup:
+
+1. Create a Kakao Developers app.
+2. Activate `Kakao Login`.
+3. In consent items, enable `Send message in Kakao Talk (talk_message)`.
+4. Complete one OAuth login flow for your own Kakao account and store the returned refresh token in `KAKAO_REFRESH_TOKEN`.
+
+Local helper:
+
+- You can issue the refresh token locally with:
+  `py scripts/get_kakao_refresh_token.py --rest-api-key "<REST_API_KEY>" --client-secret "<CLIENT_SECRET>" --open-browser`
+- Before running it, register this Redirect URI in Kakao Developers:
+  `http://127.0.0.1:8766/callback`
+
+Behavior:
+
+- On success, the message includes the target date, report count, and GitHub Pages URL.
+- On failure, the message includes the Actions run URL so you can open the log.
+- If Kakao secrets are not configured, the workflow skips the notification step.
+
 ## Schedule
 
 - The workflow runs at `22:15 UTC` on `Sunday-Thursday`.
