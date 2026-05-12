@@ -53,17 +53,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "30 14 * * 1-5" ]; then
-            python - <<'PY' >> "$GITHUB_OUTPUT"
-            from stocks import build_session, get_target_date, summarize_pending_reports
-
-            session = build_session()
-            target_date = get_target_date(session)
-            summary = summarize_pending_reports(session, target_date)
-
-            print(f"should_run={'true' if summary['has_new_reports'] else 'false'}")
-            print(f"target_date={summary['target_date']}")
-            print(f"pending_count={summary['new_report_count']}")
-            PY
+            python -c "from stocks import build_session, get_target_date, summarize_pending_reports; session = build_session(); target_date = get_target_date(session); summary = summarize_pending_reports(session, target_date); print(f\"should_run={'true' if summary['has_new_reports'] else 'false'}\"); print(f\"target_date={summary['target_date']}\"); print(f\"pending_count={summary['new_report_count']}\")" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           fi
