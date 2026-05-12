@@ -8,7 +8,8 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "15 22 * * 0-4"
+    - cron: "0 9 * * 1-5"
+    - cron: "30 14 * * 1-5"
 
 permissions:
   contents: write
@@ -22,8 +23,9 @@ concurrency:
 jobs:
   collect:
     outputs:
-      target_date: ${{ steps.capture.outputs.target_date }}
-      report_count: ${{ steps.capture.outputs.report_count }}
+      target_date: ${{ steps.capture.outputs.target_date || steps.precheck.outputs.target_date }}
+      report_count: ${{ steps.capture.outputs.report_count || steps.precheck.outputs.pending_count || '0' }}
+      should_run: ${{ steps.precheck.outputs.should_run }}
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -46,7 +48,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Decide whether collector should run
+        id: precheck
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "30 14 * * 1-5" ]; then
+            python - <<'PY' >> "$GITHUB_OUTPUT"
+            from stocks import build_session, get_target_date, summarize_pending_reports
+
+            session = build_session()
+            target_date = get_target_date(session)
+            summary = summarize_pending_reports(session, target_date)
+
+            print(f"should_run={'true' if summary['has_new_reports'] else 'false'}")
+            print(f"target_date={summary['target_date']}")
+            print(f"pending_count={summary['new_report_count']}")
+            PY
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip collector when nothing new was posted
+        if: steps.precheck.outputs.should_run != 'true'
+        run: echo "No new reports detected for the secondary scheduled run."
+
       - name: Validate secret
+        if: steps.precheck.outputs.should_run == 'true'
         shell: bash
         run: |
           if [ -z "${OPENAI_API_KEY}" ]; then
@@ -55,11 +82,12 @@ jobs:
           fi
 
       - name: Run collector
+        if: steps.precheck.outputs.should_run == 'true'
         run: python stocks.py
 
       - name: Capture run metadata
         id: capture
-        if: success()
+        if: success() && steps.precheck.outputs.should_run == 'true'
         shell: bash
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
@@ -71,6 +99,7 @@ jobs:
           PY
 
       - name: Persist archive to repository
+        if: success() && steps.precheck.outputs.should_run == 'true'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -84,6 +113,7 @@ jobs:
           fi
 
       - name: Upload reports bundle
+        if: success() && steps.precheck.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: hankyung-consensus-output
@@ -95,12 +125,14 @@ jobs:
             hankyung_consensus_summary_*.xlsx
 
       - name: Upload Pages artifact
+        if: success() && steps.precheck.outputs.should_run == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: reports_mobile
 
   deploy:
     needs: collect
+    if: needs.collect.outputs.should_run == 'true' && needs.collect.result == 'success'
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
@@ -114,7 +146,7 @@ jobs:
 
   notify:
     needs: [collect, deploy]
-    if: always()
+    if: always() && needs.collect.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     env:
       KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
