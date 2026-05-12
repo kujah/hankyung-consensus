@@ -50,8 +50,11 @@ Behavior:
 
 ## Schedule
 
-- The workflow runs at `22:15 UTC` on `Sunday-Thursday`.
-- In Korea time, that is `07:15 KST` on `Monday-Friday`.
+- The primary run executes at `09:00 UTC` on `Monday-Friday`.
+- In Korea time, that is `18:00 KST` on `Monday-Friday`.
+- A secondary check runs at `14:30 UTC` on `Monday-Friday`.
+- In Korea time, that is `23:30 KST` on `Monday-Friday`.
+- The `23:30 KST` run only continues to the full `stocks.py` collection when new report IDs are detected for that date.
 
 ## Manual run
 

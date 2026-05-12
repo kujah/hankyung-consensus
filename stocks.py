@@ -1,4 +1,5 @@
 import html
+import argparse
 import json
 import os
 import re
@@ -811,6 +812,40 @@ def append_rows_to_excel(rows: list[dict[str, Any]], excel_path: Path) -> int:
     return len(final_df)
 
 
+def summarize_pending_reports(
+    session: requests.Session,
+    target_date: str,
+) -> dict[str, Any]:
+    category_summaries: list[dict[str, Any]] = []
+    total_reports = 0
+    new_report_count = 0
+
+    for report_code, category in REPORT_TYPES.items():
+        reports = get_report_list_for_date(session, report_code, target_date)
+        existing_ids = load_existing_ids(category_excel_path(category))
+        new_reports = [
+            report for report in reports if str(report["report_idx"]) not in existing_ids
+        ]
+        total_reports += len(reports)
+        new_report_count += len(new_reports)
+        category_summaries.append(
+            {
+                "category": category,
+                "total_reports": len(reports),
+                "new_reports": len(new_reports),
+                "new_report_ids": [str(report["report_idx"]) for report in new_reports],
+            }
+        )
+
+    return {
+        "target_date": target_date,
+        "total_reports": total_reports,
+        "new_report_count": new_report_count,
+        "has_new_reports": new_report_count > 0,
+        "categories": category_summaries,
+    }
+
+
 def fetch_current_quote(session: requests.Session, stock_code: str) -> dict[str, Any]:
     response = session.get(
         "https://finance.naver.com/item/main.naver",
@@ -1038,6 +1073,65 @@ def render_mobile_html(
     }}
     .toolbar.secondary {{
       margin-top: 10px;
+    }}
+    .search-panel {{
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid rgba(216,205,183,0.9);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.62);
+    }}
+    .search-title {{
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }}
+    .search-row {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .search-row input {{
+      flex: 1 1 220px;
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: var(--paper);
+      color: var(--ink);
+      border-radius: 12px;
+      padding: 11px 12px;
+      font-size: 14px;
+    }}
+    .search-row button {{
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: white;
+      border-radius: 12px;
+      padding: 11px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }}
+    .search-hint {{
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+    .search-results {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }}
+    .search-results button {{
+      border: 1px solid rgba(0,95,115,0.12);
+      background: #f3f7f8;
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 600;
     }}
     .toolbar.cluster {{
       justify-content: space-between;
@@ -1283,6 +1377,25 @@ def render_mobile_html(
       font-size: 16px;
       font-weight: 700;
     }}
+    .history-section {{
+      margin-top: 16px;
+      display: grid;
+      gap: 12px;
+    }}
+    .history-summary {{
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 4px 0 0;
+    }}
+    .history-empty {{
+      background: rgba(255,255,255,0.84);
+      border: 1px dashed rgba(216,205,183,0.9);
+      border-radius: 18px;
+      padding: 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
     .factor-grid {{
       display: grid;
       gap: 10px;
@@ -1321,8 +1434,18 @@ def render_mobile_html(
         </div>
       </div>
       <div class="toolbar secondary" id="filters"></div>
+      <div class="search-panel">
+        <div class="search-title">종목 이력 검색</div>
+        <div class="search-row">
+          <input id="stock-search" type="search" placeholder="종목명 또는 6자리 종목코드" autocomplete="off">
+          <button id="search-button" type="button">검색</button>
+        </div>
+        <div class="search-hint">저장된 날짜별 아카이브를 기준으로 분석/요약 이력을 조회합니다.</div>
+        <div class="search-results" id="search-results"></div>
+      </div>
       <div class="stats" id="stats"></div>
     </section>
+    <section class="history-section" id="history-section"></section>
     <section class="list" id="list"></section>
   </div>
   <script>
@@ -1338,9 +1461,46 @@ def render_mobile_html(
     let currentDate = "__TARGET_DATE__";
     let reports = initialReports;
     const reportCache = new Map([[currentDate, initialReports]]);
+    let historyLoaded = false;
 
     function safe(value) {
       return value ? String(value) : "";
+    }
+
+    function parsePriceValue(value) {
+      const digits = String(value || "").replace(/[^0-9.-]/g, "");
+      if (!digits) return null;
+      const parsed = Number(digits);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function formatWon(value) {
+      if (!Number.isFinite(value)) return "";
+      return `${Math.round(value).toLocaleString("ko-KR")}원`;
+    }
+
+    function formatPercent(value) {
+      if (!Number.isFinite(value)) return "";
+      return `${value.toFixed(1)}%`;
+    }
+
+    function getUpsideData(item) {
+      const livePrice = parsePriceValue(item.live_price);
+      const targetPrice = parsePriceValue(item.target_price);
+      if (!Number.isFinite(livePrice) || !Number.isFinite(targetPrice) || livePrice <= 0) {
+        return null;
+      }
+      const diff = targetPrice - livePrice;
+      return {
+        diff,
+        pct: (diff / livePrice) * 100,
+      };
+    }
+
+    function upsideLabel(item) {
+      const upside = getUpsideData(item);
+      if (!upside) return "";
+      return `현재가 기준 상승여력 ${formatWon(upside.diff)} (${formatPercent(upside.pct)})`;
     }
 
     function filteredReports() {
@@ -1452,17 +1612,8 @@ def render_mobile_html(
     }
 
     function renderStats(items) {
-      const counts = countByCategory(items);
-      const grouped = groupedData(items);
       const root = document.getElementById("stats");
-      const parts = [
-        ["표시 중", items.length + "건"],
-        ["묶인 종목", grouped.groupedCompanies.length + "개"],
-        ["기업", (counts["기업"] || 0) + "건"],
-        ["산업", (counts["산업"] || 0) + "건"],
-        ["시장", (counts["시장"] || 0) + "건"],
-      ];
-      root.innerHTML = parts.map(([k, v]) => `<div class="stat">${k}: ${v}</div>`).join("");
+      root.innerHTML = "";
       document.getElementById("subline").textContent =
         `대상 일자: ${currentDate} · 기업은 종목별로 묶어서 보고, 현재가는 py stocks.py 실행 시점 최신값을 함께 표시함`;
     }
@@ -1521,6 +1672,190 @@ def render_mobile_html(
       alert(`종목코드 복사: ${stockCode}`);
     }
 
+    async function fetchReportsForDate(date) {
+      if (!date) return [];
+      if (reportCache.has(date)) return reportCache.get(date) || [];
+      try {
+        const response = await fetch(`./archive/${date}.json`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const nextReports = payload.reports || [];
+        reportCache.set(date, nextReports);
+        return nextReports;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    async function ensureHistoryLoaded() {
+      if (historyLoaded) return true;
+      for (const date of availableDates) {
+        const loaded = await fetchReportsForDate(date);
+        if (loaded === null) return false;
+      }
+      historyLoaded = true;
+      return true;
+    }
+
+    function allCachedReports() {
+      return Array.from(reportCache.values()).flat();
+    }
+
+    function stockCatalog() {
+      const grouped = new Map();
+      for (const item of allCachedReports()) {
+        if (item.category !== "기업" || !item.stock_code) continue;
+        const key = item.stock_code;
+        if (!grouped.has(key)) {
+          grouped.set(key, {
+            stock_code: item.stock_code,
+            company_name: item.company_name || item.title || item.stock_code,
+            report_count: 0,
+            dates: new Set(),
+            latest_date: item.published_at || "",
+          });
+        }
+        const stock = grouped.get(key);
+        stock.report_count += 1;
+        if (item.company_name) stock.company_name = item.company_name;
+        if (item.published_at) stock.dates.add(item.published_at);
+        if ((item.published_at || "") > stock.latest_date) stock.latest_date = item.published_at || "";
+      }
+      return Array.from(grouped.values());
+    }
+
+    function renderSearchResults(htmlText) {
+      document.getElementById("search-results").innerHTML = htmlText;
+    }
+
+    function renderHistoryEmpty(message) {
+      const root = document.getElementById("history-section");
+      root.innerHTML = `<div class="history-empty">${safe(message)}</div>`;
+    }
+
+    function matchingStocks(query) {
+      const keyword = String(query || "").trim().toLowerCase();
+      if (!keyword) return [];
+      return stockCatalog()
+        .map((item) => {
+          const name = String(item.company_name || "").toLowerCase();
+          const code = String(item.stock_code || "").toLowerCase();
+          let score = -1;
+          if (code === keyword) score = 100;
+          else if (name === keyword) score = 95;
+          else if (code.startsWith(keyword)) score = 80;
+          else if (name.startsWith(keyword)) score = 70;
+          else if (code.includes(keyword)) score = 60;
+          else if (name.includes(keyword)) score = 50;
+          return { ...item, score };
+        })
+        .filter((item) => item.score >= 0)
+        .sort((a, b) => {
+          const scoreDiff = b.score - a.score;
+          if (scoreDiff !== 0) return scoreDiff;
+          const dateDiff = (b.latest_date || "").localeCompare(a.latest_date || "");
+          if (dateDiff !== 0) return dateDiff;
+          return (a.company_name || "").localeCompare(b.company_name || "", "ko");
+        });
+    }
+
+    function renderHistoryForStock(stockCode) {
+      const entries = allCachedReports()
+        .filter((item) => item.category === "기업" && item.stock_code === stockCode)
+        .sort((a, b) => {
+          const dateDiff = (b.published_at || "").localeCompare(a.published_at || "");
+          if (dateDiff !== 0) return dateDiff;
+          return String(b.report_idx || "").localeCompare(String(a.report_idx || ""));
+        });
+      const root = document.getElementById("history-section");
+      if (!entries.length) {
+        renderHistoryEmpty("해당 종목의 저장된 이력이 없습니다.");
+        return;
+      }
+
+      const companyName = entries.find((item) => item.company_name)?.company_name || stockCode;
+      const uniqueDates = new Set(entries.map((item) => item.published_at).filter(Boolean));
+      const historyCards = entries.map((item) => {
+        const upside = upsideLabel(item);
+        const meta = [
+          item.published_at || "",
+          item.source ? `출처 ${item.source}` : "",
+          item.author ? `작성자 ${item.author}` : "",
+          item.investment_opinion ? `의견 ${item.investment_opinion}` : "",
+          item.target_price ? `목표가 ${item.target_price}` : "",
+          upside || "",
+        ].filter(Boolean).join(" · ");
+        return `
+          <article class="card">
+            <div class="row">
+              <span class="badge">${safe(item.published_at)}</span>
+              <span class="badge">#${safe(item.report_idx)}</span>
+              ${item.alpha_score !== null && item.alpha_score !== undefined ? `<span class="badge">${safe(item.alpha_grade || "-")} ${safe(item.alpha_score)}</span>` : ""}
+            </div>
+            <h2 class="title">${safe(item.title)}</h2>
+            <div class="meta">${meta}</div>
+            <p class="summary">${safe(item.summary)}</p>
+            <div class="links">
+              <button type="button" data-copy-stock="${safe(item.stock_code)}">종목코드 복사</button>
+              <a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>
+              <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
+              <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+            </div>
+          </article>
+        `;
+      }).join("");
+
+      root.innerHTML = `
+        <article class="card">
+          <div class="row">
+            <span class="badge">종목 이력</span>
+            <span class="badge">${safe(stockCode)}</span>
+          </div>
+          <h2 class="title">${safe(companyName)}</h2>
+          <p class="history-summary">저장된 리포트 ${entries.length}건 / 확인된 날짜 ${uniqueDates.size}일</p>
+        </article>
+        ${historyCards}
+      `;
+    }
+
+    async function runStockSearch() {
+      const input = document.getElementById("stock-search");
+      const query = String(input.value || "").trim();
+      if (!query) {
+        renderSearchResults("");
+        renderHistoryEmpty("종목명 또는 6자리 종목코드로 검색하면 저장된 분석 이력을 볼 수 있습니다.");
+        return;
+      }
+
+      renderSearchResults('<span class="badge">아카이브 확인 중...</span>');
+      const loaded = await ensureHistoryLoaded();
+      if (!loaded) {
+        renderSearchResults("");
+        renderHistoryEmpty("아카이브를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+        return;
+      }
+
+      const matches = matchingStocks(query).slice(0, 12);
+      if (!matches.length) {
+        renderSearchResults("");
+        renderHistoryEmpty(`"${query}"와 일치하는 종목 이력이 없습니다.`);
+        return;
+      }
+
+      renderSearchResults(
+        matches
+          .map(
+            (item) => `
+              <button type="button" data-stock-history="${safe(item.stock_code)}">
+                ${safe(item.company_name)} (${safe(item.stock_code)}) · ${item.report_count}건
+              </button>
+            `
+          )
+          .join("")
+      );
+      renderHistoryForStock(matches[0].stock_code);
+    }
+
     function renderFactorSections(item) {
       if (item.category !== "기업") return "";
       const sections = [];
@@ -1552,10 +1887,6 @@ def render_mobile_html(
       const { groupedCompanies, industry, market } = groupedData(items);
 
       const groupCards = groupedCompanies.map((group) => {
-        const uniqueSources = [...new Set(group.reports.map((report) => report.source).filter(Boolean))];
-        const targets = [...new Set(group.reports.map((report) => report.target_price).filter(Boolean))];
-        const opinions = [...new Set(group.reports.map((report) => report.investment_opinion).filter(Boolean))];
-
         const reportsHtml = group.reports.map((report) => {
           const pointItems = (report.key_points || []).slice(0, 4).map((point) => `<li>${safe(point)}</li>`).join("");
           return `
@@ -1563,7 +1894,12 @@ def render_mobile_html(
               <summary>
                 <div>
                   <div>${safe(report.title)}</div>
-                  <div class="report-brief">${safe(report.source)} · ${safe(report.author)} · ${safe(report.investment_opinion)} ${safe(report.target_price)}</div>
+                  <div class="report-brief">${[
+                    safe(report.source),
+                    safe(report.author),
+                    [safe(report.investment_opinion), safe(report.target_price)].filter(Boolean).join(" "),
+                    upsideLabel(report),
+                  ].filter(Boolean).join(" · ")}</div>
                 </div>
                 <div>
                   ${report.alpha_score !== null && report.alpha_score !== undefined ? `<div class="badge">${safe(report.alpha_grade || "-")} ${safe(report.alpha_score)}</div>` : ""}
@@ -1579,7 +1915,6 @@ def render_mobile_html(
                   ${report.stock_code ? `<a href="${stockWebUrl(report.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>` : ""}
                   <a href="${safe(report.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
                   <a href="${safe(report.json_path)}" target="_blank" rel="noreferrer">JSON</a>
-                  <a href="${safe(report.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
                 </div>
               </div>
             </details>
@@ -1598,9 +1933,6 @@ def render_mobile_html(
             <div class="group-meta">
               ${group.stock_code ? `<span class="pill"><button type="button" data-copy-stock="${safe(group.stock_code)}">종목코드 복사</button></span>` : ""}
               ${group.stock_code ? `<span class="pill"><a href="${stockWebUrl(group.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a></span>` : ""}
-              ${uniqueSources.slice(0, 6).map((source) => `<span class="pill">${safe(source)}</span>`).join("")}
-              ${opinions.slice(0, 4).map((opinion) => `<span class="pill">의견 ${safe(opinion)}</span>`).join("")}
-              ${targets.slice(0, 4).map((target) => `<span class="pill">목표가 ${safe(target)}</span>`).join("")}
             </div>
             <div class="report-stack">${reportsHtml}</div>
           </article>
@@ -1624,7 +1956,6 @@ def render_mobile_html(
               <div class="links">
                 <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
                 <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
-                <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
               </div>
             </article>
           `).join("")}
@@ -1648,6 +1979,7 @@ def render_mobile_html(
           item.market_topic ? `주제 ${item.market_topic}` : "",
           item.investment_opinion ? `의견 ${item.investment_opinion}` : "",
           item.target_price ? `목표가 ${item.target_price}` : "",
+          upsideLabel(item),
           item.alpha_score !== null && item.alpha_score !== undefined ? `Alpha ${item.alpha_grade || "-"} ${item.alpha_score}` : "",
           item.live_price ? `현재가 ${item.live_price}원` : "",
         ].filter(Boolean).join(" · ");
@@ -1670,7 +2002,6 @@ def render_mobile_html(
               ${item.stock_code ? `<a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>` : ""}
               <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
               <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
-              <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
             </div>
           </article>
         `;
@@ -1692,20 +2023,14 @@ def render_mobile_html(
 
     async function switchDate(nextDate) {
       if (!nextDate || nextDate === currentDate) return;
-      if (!reportCache.has(nextDate)) {
-        try {
-          const response = await fetch(`./archive/${nextDate}.json`, { cache: "no-store" });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const payload = await response.json();
-          reportCache.set(nextDate, payload.reports || []);
-        } catch (error) {
-          alert(`브리프를 불러오지 못했습니다: ${nextDate}`);
-          renderDateOptions();
-          return;
-        }
+      const nextReports = await fetchReportsForDate(nextDate);
+      if (nextReports === null) {
+        alert(`브리프를 불러오지 못했습니다: ${nextDate}`);
+        renderDateOptions();
+        return;
       }
       currentDate = nextDate;
-      reports = reportCache.get(nextDate) || [];
+      reports = nextReports;
       render();
     }
 
@@ -1716,7 +2041,25 @@ def render_mobile_html(
       await copyStockCode(trigger.getAttribute("data-copy-stock"));
     });
 
+    document.addEventListener("click", (event) => {
+      const trigger = event.target.closest("[data-stock-history]");
+      if (!trigger) return;
+      event.preventDefault();
+      renderHistoryForStock(trigger.getAttribute("data-stock-history"));
+    });
+
+    document.getElementById("search-button").addEventListener("click", () => {
+      runStockSearch();
+    });
+
+    document.getElementById("stock-search").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      runStockSearch();
+    });
+
     render();
+    renderHistoryEmpty("종목명 또는 6자리 종목코드로 검색하면 저장된 분석 이력을 볼 수 있습니다.");
   </script>
 </body>
 </html>
@@ -1760,16 +2103,32 @@ def save_mobile_outputs(target_date: str, entries: list[dict[str, Any]]) -> None
     )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Check whether the target date has any reports not yet stored locally.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     configure_stdout()
     ensure_output_dirs()
+
+    session = build_session()
+    target_date = get_target_date(session)
+
+    if args.check_only:
+        print(json.dumps(summarize_pending_reports(session, target_date), ensure_ascii=False, indent=2))
+        return
 
     if not os.getenv("OPENAI_API_KEY"):
         raise EnvironmentError("OPENAI_API_KEY is not set.")
 
-    session = build_session()
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    target_date = get_target_date(session)
 
     print(f"대상 일자: {target_date}")
 
