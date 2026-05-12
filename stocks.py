@@ -1911,10 +1911,7 @@ def render_mobile_html(
                 ${pointItems ? `<ul class="points">${pointItems}</ul>` : ""}
                 ${renderFactorSections(report)}
                 <div class="links">
-                  ${report.stock_code ? `<button type="button" data-copy-stock="${safe(report.stock_code)}">종목코드 복사</button>` : ""}
-                  ${report.stock_code ? `<a href="${stockWebUrl(report.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>` : ""}
-                  <a href="${safe(report.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
-                  <a href="${safe(report.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+                  <a href="${safe(report.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
                 </div>
               </div>
             </details>
@@ -1954,8 +1951,7 @@ def render_mobile_html(
               <p class="summary">${safe(item.summary)}</p>
               ${renderFactorSections(item)}
               <div class="links">
-                <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
-                <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+                <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
               </div>
             </article>
           `).join("")}
@@ -1998,10 +1994,7 @@ def render_mobile_html(
             ${points ? `<ul class="points">${points}</ul>` : ""}
             ${renderFactorSections(item)}
             <div class="links">
-              ${item.stock_code ? `<button type="button" data-copy-stock="${safe(item.stock_code)}">종목코드 복사</button>` : ""}
-              ${item.stock_code ? `<a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>` : ""}
-              <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
-              <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+              <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문 링크</a>
             </div>
           </article>
         `;
