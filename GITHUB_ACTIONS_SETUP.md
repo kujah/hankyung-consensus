@@ -13,6 +13,17 @@
 - Python dependencies: `requirements.txt`
 - Mobile output: `reports_mobile/index.html`
 
+Minimum files for the basic GitHub Actions run:
+
+- `stocks.py`
+- `.github/workflows/hankyung-consensus.yml`
+
+Optional:
+
+- `GITHUB_ACTIONS_SETUP.md`
+- `scripts/send_kakao_notification.py` if you want Kakao notifications
+- `requirements.txt` is not required by the workflow anymore because the workflow installs the core packages directly
+
 ## One-time GitHub setup
 
 1. Push this folder to a GitHub repository.
