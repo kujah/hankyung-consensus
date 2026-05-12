@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install beautifulsoup4 openai openpyxl pandas PyMuPDF requests
 
       - name: Decide whether collector should run
         id: precheck
@@ -170,13 +170,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests
 
       - name: Send Kakao notification
         shell: bash
         run: |
           if [ -z "${KAKAO_REST_API_KEY}" ] || [ -z "${KAKAO_CLIENT_SECRET}" ] || [ -z "${KAKAO_REFRESH_TOKEN}" ]; then
             echo "Kakao secrets are not configured. Skipping notification."
+            exit 0
+          fi
+
+          if [ ! -f "scripts/send_kakao_notification.py" ]; then
+            echo "scripts/send_kakao_notification.py is missing. Skipping notification."
             exit 0
           fi
 
