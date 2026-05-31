@@ -1367,10 +1367,12 @@ def render_mobile_html(
       color: var(--muted);
     }}
     .price-change.up {{
-      color: #d11f1f;
+      color: #d11f1f !important;
+      font-weight: 700;
     }}
     .price-change.down {{
-      color: #1f57d1;
+      color: #1f57d1 !important;
+      font-weight: 700;
     }}
     .price-extra {{
       width: 100%;
@@ -1532,6 +1534,12 @@ def render_mobile_html(
       margin: 0;
       font-size: 18px;
       line-height: 1.35;
+    }}
+    .history-title-row {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
     }}
     .history-report-badges {{
       display: flex;
@@ -1763,11 +1771,28 @@ def render_mobile_html(
     function formatQuoteAsOf(value) {
       const text = safe(value);
       const matched = text.match(/(\\d{4}\\.\\d{2}\\.\\d{2})/);
-      if (matched) return `${matched[1]} 장마감 기준`;
+      if (matched) return `${matched[1].slice(2)} 장마감 기준`;
       return text
         .replace(/^현재가\\s*/, "")
         .replace(/\\s*기준(?:\\(KRX 장마감\\)|\\(장마감\\)|\\(KRX장마감\\)|\\(KRX 마감\\))?/g, "")
         .trim();
+    }
+
+    function priceDirectionClass(group) {
+      const explicit = safe(group.live_price_direction).toLowerCase();
+      if (explicit === "up" || explicit === "rise") return "up";
+      if (explicit === "down" || explicit === "fall") return "down";
+
+      const changeAmount = parsePriceValue(group.live_price_change);
+      const changeRate = parsePriceValue(group.live_price_rate);
+      if (Number.isFinite(changeAmount) && changeAmount < 0) return "down";
+      if (Number.isFinite(changeRate) && changeRate < 0) return "down";
+      if (Number.isFinite(changeAmount) && changeAmount > 0) return "up";
+      if (Number.isFinite(changeRate) && changeRate > 0) return "up";
+
+      const text = `${safe(group.live_price_change)} ${safe(group.live_price_rate)}`;
+      if (text.includes("-")) return "down";
+      return "";
     }
 
     function renderSparkline(history) {
@@ -1812,7 +1837,7 @@ def render_mobile_html(
       }
 
       const change = [safe(group.live_price_change), safe(group.live_price_rate)].filter(Boolean).join(" / ");
-      const directionClass = safe(group.live_price_direction);
+      const directionClass = priceDirectionClass(group);
       const high52w = safe(group.live_price_high_52w);
       return `
         <div class="price-box">
@@ -1968,83 +1993,7 @@ def render_mobile_html(
     }
 
     function renderHistoryForStock(stockCode) {
-      const entries = allCachedReports()
-        .filter((item) => item.category === "기업" && item.stock_code === stockCode)
-        .sort((a, b) => {
-          const dateDiff = (b.published_at || "").localeCompare(a.published_at || "");
-          if (dateDiff !== 0) return dateDiff;
-          return String(b.report_idx || "").localeCompare(String(a.report_idx || ""));
-        });
-      const root = document.getElementById("history-section");
-      if (!entries.length) {
-        renderHistoryEmpty("해당 종목의 저장된 이력이 없습니다.");
-        return;
-      }
-
-      const companyName = entries.find((item) => item.company_name)?.company_name || stockCode;
-      const uniqueDatesCompact = new Set(entries.map((item) => item.published_at).filter(Boolean));
-      const bestEntry = entries.find((item) => item.alpha_score !== null && item.alpha_score !== undefined);
-      const historyCardsCompact = entries.map((item) => renderHistoryReportCard(item)).join("");
-      root.innerHTML = `
-        <article class="group-card history-group-card">
-          <div class="group-head">
-            <div>
-              <div class="group-title-row">
-                <h2 class="group-title">${safe(companyName)}</h2>
-              </div>
-              <div class="group-sub">醫낅ぉ肄붾뱶 ${safe(stockCode)} 쨌 由ы룷??${entries.length}嫄?쨌 ?뺤씤 ???좎쭨 ${uniqueDatesCompact.size}??${bestEntry ? ` 쨌 理쒓퀬??${safe(bestEntry.alpha_grade || "-")} ${safe(bestEntry.alpha_score ?? "")}` : ""}</div>
-            </div>
-          </div>
-          <div class="group-meta">
-            <span class="pill"><button type="button" data-copy-stock="${safe(stockCode)}">醫낅ぉ肄붾뱶 蹂듭궗</button></span>
-            <span class="pill"><a href="${stockWebUrl(stockCode)}" target="_blank" rel="noreferrer">?ㅼ씠踰꾧툑??/a></span>
-          </div>
-          <div class="report-stack">${historyCardsCompact}</div>
-        </article>
-      `;
-      return;
-      const uniqueDates = new Set(entries.map((item) => item.published_at).filter(Boolean));
-      const historyCards = entries.map((item) => {
-        const upside = upsideLabel(item);
-        const meta = [
-          item.published_at || "",
-          item.source ? `출처 ${item.source}` : "",
-          item.author ? `작성자 ${item.author}` : "",
-          item.investment_opinion ? `의견 ${item.investment_opinion}` : "",
-          item.target_price ? `목표가 ${item.target_price}` : "",
-          upside || "",
-        ].filter(Boolean).join(" · ");
-        return `
-          <article class="card">
-            <div class="row">
-              <span class="badge">${safe(item.published_at)}</span>
-              <span class="badge">#${safe(item.report_idx)}</span>
-              ${item.alpha_score !== null && item.alpha_score !== undefined ? `<span class="badge">${safe(item.alpha_grade || "-")} ${safe(item.alpha_score)}</span>` : ""}
-            </div>
-            <h2 class="title">${safe(item.title)}</h2>
-            <div class="meta">${meta}</div>
-            <p class="summary">${safe(item.summary)}</p>
-            <div class="links">
-              <button type="button" data-copy-stock="${safe(item.stock_code)}">종목코드 복사</button>
-              <a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>
-              <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
-              <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
-            </div>
-          </article>
-        `;
-      }).join("");
-
-      root.innerHTML = `
-        <article class="card">
-          <div class="row">
-            <span class="badge">종목 이력</span>
-            <span class="badge">${safe(stockCode)}</span>
-          </div>
-          <h2 class="title">${safe(companyName)}</h2>
-          <p class="history-summary">저장된 리포트 ${entries.length}건 / 확인된 날짜 ${uniqueDates.size}일</p>
-        </article>
-        ${historyCards}
-      `;
+      renderHistoryForStockCompact(stockCode);
     }
 
     function renderHistoryReportCardCompact(item) {
@@ -2057,14 +2006,14 @@ def render_mobile_html(
       return `
         <article class="history-report-card">
           <div class="history-report-main">
-            <h3 class="history-report-title">${safe(item.title)}</h3>
+            <div class="history-title-row">
+              <h3 class="history-report-title">${safe(item.title)}</h3>
+              ${item.published_at ? `<span class="badge">${safe(item.published_at)}</span>` : ""}
+            </div>
             <div class="report-brief">${meta}</div>
             <p class="summary">${safe(item.summary)}</p>
             <div class="links">
               <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문</a>
-              <a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>
-              <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
-              <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
             </div>
           </div>
           <div class="history-report-badges">
