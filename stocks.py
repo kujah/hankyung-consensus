@@ -890,6 +890,47 @@ def fetch_current_quote(session: requests.Session, stock_code: str) -> dict[str,
     }
 
 
+def fetch_price_history(
+    session: requests.Session,
+    stock_code: str,
+    count: int = 90,
+) -> list[dict[str, Any]]:
+    endpoints = [
+        (
+            "https://fchart.stock.naver.com/sise.nhn",
+            {"symbol": stock_code, "timeframe": "day", "count": str(count), "requestType": "0"},
+        ),
+        (
+            "https://finance.naver.com/item/fchart.naver",
+            {"code": stock_code, "timeframe": "day", "count": str(count), "requestType": "0"},
+        ),
+    ]
+
+    for url, params in endpoints:
+        try:
+            response = session.get(url, params=params, timeout=20)
+            response.raise_for_status()
+
+            points: list[dict[str, Any]] = []
+            for matched in re.finditer(
+                r'data="(?P<date>\d{8})\|(?P<open>[0-9.]+)\|(?P<high>[0-9.]+)\|(?P<low>[0-9.]+)\|(?P<close>[0-9.]+)\|(?P<volume>[0-9.]+)"',
+                response.text,
+            ):
+                raw_date = matched.group("date")
+                close = float(matched.group("close"))
+                points.append(
+                    {
+                        "date": f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}",
+                        "close": int(round(close)),
+                    }
+                )
+            if points:
+                return points[-count:]
+        except Exception:
+            continue
+    return []
+
+
 def attach_current_quotes(
     session: requests.Session,
     entries: list[dict[str, Any]],
@@ -903,7 +944,9 @@ def attach_current_quotes(
         if stock_code:
             if stock_code not in cache:
                 try:
-                    cache[stock_code] = fetch_current_quote(session, stock_code)
+                    quote_payload = fetch_current_quote(session, stock_code)
+                    quote_payload["price_history"] = fetch_price_history(session, stock_code)
+                    cache[stock_code] = quote_payload
                 except Exception:
                     cache[stock_code] = {
                         "live_price": None,
@@ -911,6 +954,7 @@ def attach_current_quotes(
                         "live_price_rate": None,
                         "live_price_direction": None,
                         "live_price_as_of": None,
+                        "price_history": [],
                     }
             enriched_entry.update(cache[stock_code])
         enriched.append(enriched_entry)
@@ -958,6 +1002,7 @@ def build_mobile_entry(
         "live_price_rate": None,
         "live_price_direction": None,
         "live_price_as_of": None,
+        "price_history": [],
         "pdf_path": relative_pdf.as_posix(),
         "json_path": relative_json.as_posix(),
         "pdf_url": report["pdf_url"],
@@ -1264,12 +1309,16 @@ def render_mobile_html(
       font-family: inherit;
     }}
     .group-head {{
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-start;
+      display: grid;
+      gap: 10px;
       flex-wrap: wrap;
       margin-bottom: 14px;
+    }}
+    .group-title-row {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 8px 14px;
     }}
     .group-title {{
       margin: 0;
@@ -1283,26 +1332,39 @@ def render_mobile_html(
       margin-top: 6px;
     }}
     .price-box {{
-      min-width: 220px;
-      background: linear-gradient(180deg, #fff8ed 0%, #fff2e1 100%);
-      border: 1px solid rgba(202,103,2,0.18);
-      border-radius: 18px;
-      padding: 12px 14px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 10px;
+      min-width: 0;
     }}
     .price-label {{
       color: var(--muted);
       font-size: 12px;
-      margin-bottom: 4px;
+      margin: 0;
     }}
     .price-main {{
-      font-size: 24px;
+      font-size: 18px;
       font-weight: 700;
       line-height: 1.1;
     }}
     .price-change {{
-      margin-top: 6px;
       font-size: 13px;
       color: var(--muted);
+    }}
+    .price-chart {{
+      width: min(220px, 100%);
+      height: 52px;
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fff8ed 0%, #fff2e1 100%);
+      border: 1px solid rgba(202,103,2,0.18);
+    }}
+    .price-chart svg {{
+      display: block;
+      width: 100%;
+      height: 100%;
     }}
     .group-meta {{
       display: flex;
@@ -1418,6 +1480,50 @@ def render_mobile_html(
       font-size: 13px;
       line-height: 1.5;
     }}
+    .history-group-card {{
+      padding-bottom: 14px;
+    }}
+    .history-report-card {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      border: 1px solid rgba(216,205,183,0.9);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.82);
+    }}
+    .history-report-main {{
+      min-width: 0;
+      flex: 1;
+    }}
+    .history-report-title {{
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.35;
+    }}
+    .history-report-badges {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      min-width: 112px;
+    }}
+    @media (max-width: 640px) {{
+      .group-title {{
+        font-size: 20px;
+      }}
+      .history-report-card {{
+        display: grid;
+      }}
+      .history-report-badges {{
+        justify-content: flex-start;
+        min-width: 0;
+      }}
+      .price-chart {{
+        width: 100%;
+      }}
+    }}
   </style>
 </head>
 <body>
@@ -1531,12 +1637,16 @@ def render_mobile_html(
               live_price_change: item.live_price_change,
               live_price_rate: item.live_price_rate,
               live_price_as_of: item.live_price_as_of,
+              price_history: item.price_history || [],
               best_alpha_score: item.alpha_score,
               best_alpha_grade: item.alpha_grade,
               reports: [],
             });
           }
           const group = groups.get(key);
+          if ((!group.price_history || !group.price_history.length) && item.price_history?.length) {
+            group.price_history = item.price_history;
+          }
           if ((item.alpha_score || -1) > (group.best_alpha_score || -1)) {
             group.best_alpha_score = item.alpha_score;
             group.best_alpha_grade = item.alpha_grade;
@@ -1618,6 +1728,36 @@ def render_mobile_html(
         `대상 일자: ${currentDate} · 기업은 종목별로 묶어서 보고, 현재가는 py stocks.py 실행 시점 최신값을 함께 표시함`;
     }
 
+    function renderSparkline(history) {
+      const values = (history || [])
+        .map((item) => parsePriceValue(item.close))
+        .filter((value) => Number.isFinite(value));
+      if (values.length < 2) return "";
+
+      const width = 220;
+      const height = 40;
+      const padding = 2;
+      const minValue = Math.min(...values);
+      const maxValue = Math.max(...values);
+      const range = Math.max(maxValue - minValue, 1);
+      const points = values.map((value, index) => {
+        const x = padding + ((width - padding * 2) * index) / (values.length - 1);
+        const y = height - padding - ((value - minValue) / range) * (height - padding * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      const lastPoint = points[points.length - 1].split(",");
+      const trendUp = values[values.length - 1] >= values[0];
+      const stroke = trendUp ? "#0d7a5f" : "#ca6702";
+      return `
+        <div class="price-chart" aria-label="최근 3개월 주가 추이">
+          <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-hidden="true">
+            <polyline fill="none" stroke="${stroke}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="${points.join(" ")}"></polyline>
+            <circle cx="${lastPoint[0]}" cy="${lastPoint[1]}" r="2.8" fill="${stroke}"></circle>
+          </svg>
+        </div>
+      `;
+    }
+
     function renderPriceBox(group) {
       if (!group.live_price) {
         return `
@@ -1634,6 +1774,7 @@ def render_mobile_html(
           <div class="price-label">현재가 ${safe(group.live_price_as_of)}</div>
           <div class="price-main">${safe(group.live_price)}원</div>
           <div class="price-change">${change}</div>
+          ${renderSparkline(group.price_history)}
         </div>
       `;
     }
@@ -1759,6 +1900,27 @@ def render_mobile_html(
         });
     }
 
+    function renderHistoryReportCard(item) {
+      const meta = [
+        safe(item.source),
+        safe(item.author),
+        [safe(item.investment_opinion), safe(item.target_price)].filter(Boolean).join(" "),
+        upsideLabel(item),
+      ].filter(Boolean).join(" 쨌 ");
+      return `
+        <article class="history-report-card">
+          <div class="history-report-main">
+            <h3 class="history-report-title">${safe(item.title)}</h3>
+            <div class="report-brief">${meta}</div>
+          </div>
+          <div class="history-report-badges">
+            ${item.alpha_score !== null && item.alpha_score !== undefined ? `<span class="badge">${safe(item.alpha_grade || "-")} ${safe(item.alpha_score)}</span>` : ""}
+            <span class="badge">#${safe(item.report_idx)}</span>
+          </div>
+        </article>
+      `;
+    }
+
     function renderHistoryForStock(stockCode) {
       const entries = allCachedReports()
         .filter((item) => item.category === "기업" && item.stock_code === stockCode)
@@ -1774,6 +1936,27 @@ def render_mobile_html(
       }
 
       const companyName = entries.find((item) => item.company_name)?.company_name || stockCode;
+      const uniqueDatesCompact = new Set(entries.map((item) => item.published_at).filter(Boolean));
+      const bestEntry = entries.find((item) => item.alpha_score !== null && item.alpha_score !== undefined);
+      const historyCardsCompact = entries.map((item) => renderHistoryReportCard(item)).join("");
+      root.innerHTML = `
+        <article class="group-card history-group-card">
+          <div class="group-head">
+            <div>
+              <div class="group-title-row">
+                <h2 class="group-title">${safe(companyName)}</h2>
+              </div>
+              <div class="group-sub">醫낅ぉ肄붾뱶 ${safe(stockCode)} 쨌 由ы룷??${entries.length}嫄?쨌 ?뺤씤 ???좎쭨 ${uniqueDatesCompact.size}??${bestEntry ? ` 쨌 理쒓퀬??${safe(bestEntry.alpha_grade || "-")} ${safe(bestEntry.alpha_score ?? "")}` : ""}</div>
+            </div>
+          </div>
+          <div class="group-meta">
+            <span class="pill"><button type="button" data-copy-stock="${safe(stockCode)}">醫낅ぉ肄붾뱶 蹂듭궗</button></span>
+            <span class="pill"><a href="${stockWebUrl(stockCode)}" target="_blank" rel="noreferrer">?ㅼ씠踰꾧툑??/a></span>
+          </div>
+          <div class="report-stack">${historyCardsCompact}</div>
+        </article>
+      `;
+      return;
       const uniqueDates = new Set(entries.map((item) => item.published_at).filter(Boolean));
       const historyCards = entries.map((item) => {
         const upside = upsideLabel(item);
@@ -1818,6 +2001,65 @@ def render_mobile_html(
       `;
     }
 
+    function renderHistoryReportCardCompact(item) {
+      const meta = [
+        safe(item.source),
+        safe(item.author),
+        [safe(item.investment_opinion), safe(item.target_price)].filter(Boolean).join(" "),
+        upsideLabel(item),
+      ].filter(Boolean).join(" / ");
+      return `
+        <article class="history-report-card">
+          <div class="history-report-main">
+            <h3 class="history-report-title">${safe(item.title)}</h3>
+            <div class="report-brief">${meta}</div>
+          </div>
+          <div class="history-report-badges">
+            ${item.alpha_score !== null && item.alpha_score !== undefined ? `<span class="badge">${safe(item.alpha_grade || "-")} ${safe(item.alpha_score)}</span>` : ""}
+            <span class="badge">#${safe(item.report_idx)}</span>
+          </div>
+        </article>
+      `;
+    }
+
+    function renderHistoryForStockCompact(stockCode) {
+      const entries = allCachedReports()
+        .filter((item) => item.stock_code === stockCode)
+        .sort((a, b) => {
+          const dateDiff = (b.published_at || "").localeCompare(a.published_at || "");
+          if (dateDiff !== 0) return dateDiff;
+          return String(b.report_idx || "").localeCompare(String(a.report_idx || ""));
+        });
+      const root = document.getElementById("history-section");
+      if (!entries.length) {
+        renderHistoryEmpty("?대떦 醫낅ぉ????λ맂 ?대젰???놁뒿?덈떎.");
+        return;
+      }
+
+      const companyName = entries.find((item) => item.company_name)?.company_name || stockCode;
+      const uniqueDates = new Set(entries.map((item) => item.published_at).filter(Boolean));
+      const bestEntry = entries.find((item) => item.alpha_score !== null && item.alpha_score !== undefined);
+      const cards = entries.map((item) => renderHistoryReportCardCompact(item)).join("");
+
+      root.innerHTML = `
+        <article class="group-card history-group-card">
+          <div class="group-head">
+            <div>
+              <div class="group-title-row">
+                <h2 class="group-title">${safe(companyName)}</h2>
+              </div>
+              <div class="group-sub">Code ${safe(stockCode)} / Reports ${entries.length} / Dates ${uniqueDates.size}${bestEntry ? ` / Best ${safe(bestEntry.alpha_grade || "-")} ${safe(bestEntry.alpha_score ?? "")}` : ""}</div>
+            </div>
+          </div>
+          <div class="group-meta">
+            <span class="pill"><button type="button" data-copy-stock="${safe(stockCode)}">Copy code</button></span>
+            <span class="pill"><a href="${stockWebUrl(stockCode)}" target="_blank" rel="noreferrer">Naver Finance</a></span>
+          </div>
+          <div class="report-stack">${cards}</div>
+        </article>
+      `;
+    }
+
     async function runStockSearch() {
       const input = document.getElementById("stock-search");
       const query = String(input.value || "").trim();
@@ -1853,7 +2095,7 @@ def render_mobile_html(
           )
           .join("")
       );
-      renderHistoryForStock(matches[0].stock_code);
+      renderHistoryForStockCompact(matches[0].stock_code);
     }
 
     function renderFactorSections(item) {
@@ -1922,10 +2164,12 @@ def render_mobile_html(
           <article class="group-card">
             <div class="group-head">
               <div>
-                <h2 class="group-title">${safe(group.company_name)}</h2>
+                <div class="group-title-row">
+                  <h2 class="group-title">${safe(group.company_name)}</h2>
+                  ${renderPriceBox(group)}
+                </div>
                 <div class="group-sub">종목코드 ${safe(group.stock_code)} · 리포트 ${group.reports.length}건 · 최고점 ${safe(group.best_alpha_grade || "-")} ${safe(group.best_alpha_score ?? "")}</div>
               </div>
-              ${renderPriceBox(group)}
             </div>
             <div class="group-meta">
               ${group.stock_code ? `<span class="pill"><button type="button" data-copy-stock="${safe(group.stock_code)}">종목코드 복사</button></span>` : ""}
@@ -2038,7 +2282,7 @@ def render_mobile_html(
       const trigger = event.target.closest("[data-stock-history]");
       if (!trigger) return;
       event.preventDefault();
-      renderHistoryForStock(trigger.getAttribute("data-stock-history"));
+      renderHistoryForStockCompact(trigger.getAttribute("data-stock-history"));
     });
 
     document.getElementById("search-button").addEventListener("click", () => {
