@@ -881,12 +881,24 @@ def fetch_current_quote(session: requests.Session, stock_code: str) -> dict[str,
     if change_rate and not change_rate.endswith("%"):
         change_rate = f"{change_rate}%"
 
+    page_text = soup.get_text(" ", strip=True)
+    high_52w = None
+    for pattern in (
+        r"52주\s*최고\s*([0-9,]+)",
+        r"52주\s*최고가\s*([0-9,]+)",
+    ):
+        matched = re.search(pattern, page_text)
+        if matched:
+            high_52w = clean_text(matched.group(1))
+            break
+
     return {
         "live_price": clean_text(price_node.get_text(" ", strip=True)),
         "live_price_change": change_amount,
         "live_price_rate": change_rate,
         "live_price_direction": direction,
         "live_price_as_of": quote_as_of,
+        "live_price_high_52w": high_52w,
     }
 
 
@@ -954,6 +966,7 @@ def attach_current_quotes(
                         "live_price_rate": None,
                         "live_price_direction": None,
                         "live_price_as_of": None,
+                        "live_price_high_52w": None,
                         "price_history": [],
                     }
             enriched_entry.update(cache[stock_code])
@@ -1002,6 +1015,7 @@ def build_mobile_entry(
         "live_price_rate": None,
         "live_price_direction": None,
         "live_price_as_of": None,
+        "live_price_high_52w": None,
         "price_history": [],
         "pdf_path": relative_pdf.as_posix(),
         "json_path": relative_json.as_posix(),
@@ -1352,6 +1366,17 @@ def render_mobile_html(
       font-size: 13px;
       color: var(--muted);
     }}
+    .price-change.up {{
+      color: #d11f1f;
+    }}
+    .price-change.down {{
+      color: #1f57d1;
+    }}
+    .price-extra {{
+      width: 100%;
+      font-size: 12px;
+      color: var(--muted);
+    }}
     .price-chart {{
       width: min(220px, 100%);
       height: 52px;
@@ -1365,6 +1390,12 @@ def render_mobile_html(
       display: block;
       width: 100%;
       height: 100%;
+    }}
+    .price-caption {{
+      width: 100%;
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--muted);
     }}
     .group-meta {{
       display: flex;
@@ -1637,6 +1668,7 @@ def render_mobile_html(
               live_price_change: item.live_price_change,
               live_price_rate: item.live_price_rate,
               live_price_as_of: item.live_price_as_of,
+              live_price_high_52w: item.live_price_high_52w,
               price_history: item.price_history || [],
               best_alpha_score: item.alpha_score,
               best_alpha_grade: item.alpha_grade,
@@ -1724,8 +1756,18 @@ def render_mobile_html(
     function renderStats(items) {
       const root = document.getElementById("stats");
       root.innerHTML = "";
-      document.getElementById("subline").textContent =
-        `대상 일자: ${currentDate} · 기업은 종목별로 묶어서 보고, 현재가는 py stocks.py 실행 시점 최신값을 함께 표시함`;
+      document.getElementById("subline").textContent = "";
+      document.getElementById("subline").style.display = "none";
+    }
+
+    function formatQuoteAsOf(value) {
+      const text = safe(value);
+      const matched = text.match(/(\\d{4}\\.\\d{2}\\.\\d{2})/);
+      if (matched) return `${matched[1]} 장마감 기준`;
+      return text
+        .replace(/^현재가\\s*/, "")
+        .replace(/\\s*기준(?:\\(KRX 장마감\\)|\\(장마감\\)|\\(KRX장마감\\)|\\(KRX 마감\\))?/g, "")
+        .trim();
     }
 
     function renderSparkline(history) {
@@ -1755,6 +1797,7 @@ def render_mobile_html(
             <circle cx="${lastPoint[0]}" cy="${lastPoint[1]}" r="2.8" fill="${stroke}"></circle>
           </svg>
         </div>
+        <div class="price-caption">[3개월 주가 추이]</div>
       `;
     }
 
@@ -1769,11 +1812,14 @@ def render_mobile_html(
       }
 
       const change = [safe(group.live_price_change), safe(group.live_price_rate)].filter(Boolean).join(" / ");
+      const directionClass = safe(group.live_price_direction);
+      const high52w = safe(group.live_price_high_52w);
       return `
         <div class="price-box">
-          <div class="price-label">현재가 ${safe(group.live_price_as_of)}</div>
+          <div class="price-label">${formatQuoteAsOf(group.live_price_as_of)}</div>
           <div class="price-main">${safe(group.live_price)}원</div>
-          <div class="price-change">${change}</div>
+          <div class="price-change ${directionClass}">${change}</div>
+          ${high52w ? `<div class="price-extra">52주 최고가 ${high52w}원</div>` : ""}
           ${renderSparkline(group.price_history)}
         </div>
       `;
@@ -2013,6 +2059,13 @@ def render_mobile_html(
           <div class="history-report-main">
             <h3 class="history-report-title">${safe(item.title)}</h3>
             <div class="report-brief">${meta}</div>
+            <p class="summary">${safe(item.summary)}</p>
+            <div class="links">
+              <a href="${safe(item.pdf_url)}" target="_blank" rel="noreferrer">원문</a>
+              <a href="${stockWebUrl(item.stock_code)}" target="_blank" rel="noreferrer">네이버금융</a>
+              <a href="${safe(item.pdf_path)}" target="_blank" rel="noreferrer">PDF</a>
+              <a href="${safe(item.json_path)}" target="_blank" rel="noreferrer">JSON</a>
+            </div>
           </div>
           <div class="history-report-badges">
             ${item.alpha_score !== null && item.alpha_score !== undefined ? `<span class="badge">${safe(item.alpha_grade || "-")} ${safe(item.alpha_score)}</span>` : ""}
@@ -2048,12 +2101,11 @@ def render_mobile_html(
               <div class="group-title-row">
                 <h2 class="group-title">${safe(companyName)}</h2>
               </div>
-              <div class="group-sub">Code ${safe(stockCode)} / Reports ${entries.length} / Dates ${uniqueDates.size}${bestEntry ? ` / Best ${safe(bestEntry.alpha_grade || "-")} ${safe(bestEntry.alpha_score ?? "")}` : ""}</div>
             </div>
           </div>
           <div class="group-meta">
-            <span class="pill"><button type="button" data-copy-stock="${safe(stockCode)}">Copy code</button></span>
-            <span class="pill"><a href="${stockWebUrl(stockCode)}" target="_blank" rel="noreferrer">Naver Finance</a></span>
+            <span class="pill"><button type="button" data-copy-stock="${safe(stockCode)}">종목코드 복사</button></span>
+            <span class="pill"><a href="${stockWebUrl(stockCode)}" target="_blank" rel="noreferrer">네이버금융</a></span>
           </div>
           <div class="report-stack">${cards}</div>
         </article>
@@ -2168,7 +2220,6 @@ def render_mobile_html(
                   <h2 class="group-title">${safe(group.company_name)}</h2>
                   ${renderPriceBox(group)}
                 </div>
-                <div class="group-sub">종목코드 ${safe(group.stock_code)} · 리포트 ${group.reports.length}건 · 최고점 ${safe(group.best_alpha_grade || "-")} ${safe(group.best_alpha_score ?? "")}</div>
               </div>
             </div>
             <div class="group-meta">
