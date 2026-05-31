@@ -8,8 +8,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "0 9 * * 1-5"
-    - cron: "30 14 * * 1-5"
+    - cron: "0 8 * * 1-5"
 
 permissions:
   contents: write
@@ -23,12 +22,15 @@ concurrency:
 jobs:
   collect:
     outputs:
-      target_date: ${{ steps.capture.outputs.target_date || steps.precheck.outputs.target_date }}
-      report_count: ${{ steps.capture.outputs.report_count || steps.precheck.outputs.pending_count || '0' }}
-      should_run: ${{ steps.precheck.outputs.should_run }}
+      target_date: ${{ steps.capture.outputs.target_date }}
+      report_count: ${{ steps.capture.outputs.report_count || '0' }}
+      should_run: 'true'
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      HANKYUNG_EMAIL_TO: kujah@poscointl.com
       HANKYUNG_TARGET_DATE: ${{ github.event.inputs.target_date || '' }}
       TZ: Asia/Seoul
     steps:
@@ -48,22 +50,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install beautifulsoup4 openai openpyxl pandas PyMuPDF requests
 
-      - name: Decide whether collector should run
-        id: precheck
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "30 14 * * 1-5" ]; then
-            python -c "from stocks import build_session, get_target_date, summarize_pending_reports; session = build_session(); target_date = get_target_date(session); summary = summarize_pending_reports(session, target_date); print(f\"should_run={'true' if summary['has_new_reports'] else 'false'}\"); print(f\"target_date={summary['target_date']}\"); print(f\"pending_count={summary['new_report_count']}\")" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Skip collector when nothing new was posted
-        if: steps.precheck.outputs.should_run != 'true'
-        run: echo "No new reports detected for the secondary scheduled run."
-
       - name: Validate secret
-        if: steps.precheck.outputs.should_run == 'true'
         shell: bash
         run: |
           if [ -z "${OPENAI_API_KEY}" ]; then
@@ -72,12 +59,11 @@ jobs:
           fi
 
       - name: Run collector
-        if: steps.precheck.outputs.should_run == 'true'
         run: python stocks.py
 
       - name: Capture run metadata
         id: capture
-        if: success() && steps.precheck.outputs.should_run == 'true'
+        if: success()
         shell: bash
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
@@ -89,7 +75,7 @@ jobs:
           PY
 
       - name: Persist archive to repository
-        if: success() && steps.precheck.outputs.should_run == 'true'
+        if: success()
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -102,8 +88,26 @@ jobs:
             git push
           fi
 
+      - name: Send Gmail digest
+        if: success()
+        shell: bash
+        env:
+          HANKYUNG_PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: |
+          if [ -z "${GMAIL_USERNAME}" ] || [ -z "${GMAIL_APP_PASSWORD}" ]; then
+            echo "Gmail secrets are not configured. Skipping email."
+            exit 0
+          fi
+
+          if [ ! -f "scripts/send_hankyung_email.py" ]; then
+            echo "scripts/send_hankyung_email.py is missing. Skipping email."
+            exit 0
+          fi
+
+          python scripts/send_hankyung_email.py --input reports_mobile/latest.json --recipient "${HANKYUNG_EMAIL_TO}"
+
       - name: Upload reports bundle
-        if: success() && steps.precheck.outputs.should_run == 'true'
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: hankyung-consensus-output
@@ -115,14 +119,14 @@ jobs:
             hankyung_consensus_summary_*.xlsx
 
       - name: Upload Pages artifact
-        if: success() && steps.precheck.outputs.should_run == 'true'
+        if: success()
         uses: actions/upload-pages-artifact@v3
         with:
           path: reports_mobile
 
   deploy:
     needs: collect
-    if: needs.collect.outputs.should_run == 'true' && needs.collect.result == 'success'
+    if: needs.collect.result == 'success'
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
@@ -133,61 +137,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
-  notify:
-    needs: [collect, deploy]
-    if: always() && needs.collect.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
-    env:
-      KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
-      KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
-      KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
-      TARGET_DATE: ${{ needs.collect.outputs.target_date }}
-      REPORT_COUNT: ${{ needs.collect.outputs.report_count }}
-      PAGE_URL: ${{ needs.deploy.outputs.page_url }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      COLLECT_RESULT: ${{ needs.collect.result }}
-      DEPLOY_RESULT: ${{ needs.deploy.result }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Send Kakao notification
-        shell: bash
-        run: |
-          if [ -z "${KAKAO_REST_API_KEY}" ] || [ -z "${KAKAO_CLIENT_SECRET}" ] || [ -z "${KAKAO_REFRESH_TOKEN}" ]; then
-            echo "Kakao secrets are not configured. Skipping notification."
-            exit 0
-          fi
-
-          if [ ! -f "scripts/send_kakao_notification.py" ]; then
-            echo "scripts/send_kakao_notification.py is missing. Skipping notification."
-            exit 0
-          fi
-
-          status_label="FAILED"
-          note="collect_or_deploy_failed"
-          if [ "${COLLECT_RESULT}" = "success" ] && [ "${DEPLOY_RESULT}" = "success" ]; then
-            status_label="DONE"
-            note="updated"
-          elif [ "${COLLECT_RESULT}" = "success" ] && [ "${DEPLOY_RESULT}" != "success" ]; then
-            note="deploy_failed"
-          fi
-
-          python scripts/send_kakao_notification.py \
-            --status-label "${status_label}" \
-            --target-date "${TARGET_DATE}" \
-            --report-count "${REPORT_COUNT}" \
-            --page-url "${PAGE_URL}" \
-            --run-url "${RUN_URL}" \
-            --note "${note}"
